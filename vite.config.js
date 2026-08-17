@@ -31,7 +31,9 @@ function chatDevProxy(apiKey) {
                 "content-type": "application/json",
                 authorization: `Bearer ${apiKey}`,
               },
-              body: JSON.stringify(groqPayload(history)),
+              body: JSON.stringify(
+                groqPayload(history, typeof body.material === "string" ? body.material : "")
+              ),
             });
             if (upstream.status === 429) {
               const errText = await upstream.text();

@@ -35,6 +35,7 @@ export default {
     if (!history.length) {
       return new Response(JSON.stringify({ error: "empty" }), { status: 400, headers: cors });
     }
+    const material = typeof body.material === "string" ? body.material : "";
 
     const upstream = await fetch("https://api.groq.com/openai/v1/chat/completions", {
       method: "POST",
@@ -42,7 +43,7 @@ export default {
         "content-type": "application/json",
         authorization: `Bearer ${env.GROQ_API_KEY}`,
       },
-      body: JSON.stringify(groqPayload(history)),
+      body: JSON.stringify(groqPayload(history, material)),
     });
 
     if (upstream.status === 429) {

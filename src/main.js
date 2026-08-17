@@ -277,6 +277,7 @@ const viewer = {
   marbleMaterial: null,
   textured: {}, // slug -> { material, ready, wanted }
   pendingVariant: null,
+  currentVariant: "carrara",
 };
 
 const TRIPLANAR_GLSL = /* glsl */ `
@@ -403,6 +404,7 @@ function selectVariant(name) {
     b.classList.toggle("active", b.dataset.variant === name);
   });
   Object.assign(lightTarget, LIGHT_PROFILES[MARBLES[name] ? "marble" : "textured"]);
+  viewer.currentVariant = name;
   if (!viewer.meshes.length) {
     viewer.pendingVariant = name;
     if (MARBLES[name]) setMarble(name);
@@ -523,6 +525,8 @@ initChat({
   onReply: () => {
     state.excite = 1.6;
   },
+  /* so Simon knows what he's currently rendered as */
+  getMaterial: () => viewer.currentVariant,
 });
 
 const loader = new GLTFLoader();

@@ -12,7 +12,7 @@ const ENDPOINT = import.meta.env.DEV ? "/api/chat" : import.meta.env.VITE_CHAT_U
 const STORE_KEY = "simon-chat-history";
 const MAX_STORED = 200;
 
-export function initChat({ onThinking, onReply } = {}) {
+export function initChat({ onThinking, onReply, getMaterial } = {}) {
   const root = document.getElementById("chat");
   if (!root) return;
   if (!ENDPOINT) {
@@ -90,6 +90,7 @@ export function initChat({ onThinking, onReply } = {}) {
         headers: { "content-type": "application/json" },
         body: JSON.stringify({
           messages: history.slice(-10).map((m) => ({ role: m.role, content: m.content })),
+          material: getMaterial ? getMaterial() : "",
         }),
       });
       const data = await res.json();

@@ -20,15 +20,32 @@ export function polish(text) {
     .replace(/(^|[\s("'])i([\s,.!?;:'")]|$)/g, "$1I$2");
 }
 
-export function groqPayload(history) {
+/* What the material switcher can render him as — mapped server-side from
+   the slug the client sends, so the field can't smuggle in prompt text. */
+export const MATERIAL_NAMES = {
+  carrara: "classic white Carrara marble — your proper, dignified form",
+  tiles: "glossy rectangular marble tiles, like a fancy bathroom wall",
+  metal: "patchy raw metal, like something dragged out of a scrapyard",
+  stucco: "stucco plaster, like a cheap apartment ceiling",
+};
+
+export function groqPayload(history, material) {
   /* polish assistant turns in the context too, so old lowercase chats
      stored in visitors' browsers stop teaching him bad habits */
   const cleaned = history.map((m) =>
     m.role === "assistant" ? { ...m, content: polish(m.content) } : m
   );
+  const messages = [{ role: "system", content: PERSONA }];
+  const look = MATERIAL_NAMES[material];
+  if (look) {
+    messages.push({
+      role: "system",
+      content: `CURRENT LOOK: the visitor currently has your bust rendered as ${look}. If your material comes up, THAT is what you are right now — react accordingly (smug if marble, irritated at the visitor otherwise). Don't bring it up unprompted unless it's genuinely funny to.`,
+    });
+  }
   return {
     model: MODEL,
-    messages: [{ role: "system", content: PERSONA }, ...cleaned],
+    messages: [...messages, ...cleaned],
     max_tokens: 300,
     temperature: 0.9,
     reasoning_effort: "none",
