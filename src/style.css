@@ -325,18 +325,12 @@ body.ready #marbles {
   background-position: center;
 }
 
-/* Narrow screens: the side column would sit behind the chat input, so the
-   swatches become a centred row beneath it instead. */
+/* Narrow screens: the column would sit behind the chat input at the
+   bottom, so it moves to the top-right corner instead. */
 @media (max-width: 640px) {
-  #chat {
-    bottom: calc(2vh + 46px);
-  }
   #marbles {
-    flex-direction: row;
-    right: auto;
-    left: 50%;
-    transform: translateX(-50%);
-    bottom: 1.6vh;
-    gap: 14px;
+    top: 3vh;
+    bottom: auto;
+    right: 3.5vw;
   }
 }
