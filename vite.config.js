@@ -1,5 +1,5 @@
 import { defineConfig, loadEnv } from "vite";
-import { cannedLimitReply, cleanReply, groqPayload } from "./worker/persona.js";
+import { cannedBusyReply, cannedLimitReply, cleanReply, groqPayload } from "./worker/persona.js";
 
 /* Dev-only stand-in for the Cloudflare Worker: proxies /api/chat to Groq
    using GROQ_API_KEY from .env.local (never exposed to the client — no
@@ -25,16 +25,26 @@ function chatDevProxy(apiKey) {
               .filter((m) => m && (m.role === "user" || m.role === "assistant") && typeof m.content === "string")
               .slice(-10)
               .map((m) => ({ role: m.role, content: m.content.slice(0, 500) }));
-            const upstream = await fetch("https://api.groq.com/openai/v1/chat/completions", {
-              method: "POST",
-              headers: {
-                "content-type": "application/json",
-                authorization: `Bearer ${apiKey}`,
-              },
-              body: JSON.stringify(
-                groqPayload(history, typeof body.material === "string" ? body.material : "")
-              ),
-            });
+            const callGroq = () =>
+              fetch("https://api.groq.com/openai/v1/chat/completions", {
+                method: "POST",
+                headers: {
+                  "content-type": "application/json",
+                  authorization: `Bearer ${apiKey}`,
+                },
+                body: JSON.stringify(
+                  groqPayload(history, typeof body.material === "string" ? body.material : "")
+                ),
+              });
+            let upstream = await callGroq();
+            if (upstream.status >= 500) {
+              await new Promise((r) => setTimeout(r, 500));
+              upstream = await callGroq();
+            }
+            if (upstream.status >= 500) {
+              res.end(JSON.stringify({ reply: cannedBusyReply() }));
+              return;
+            }
             if (upstream.status === 429) {
               const errText = await upstream.text();
               const daily = /per day|TPD|RPD/i.test(errText);

@@ -3,7 +3,7 @@
  * API key stays server-side. Deploy with wrangler (see worker/README.md);
  * the key is stored as a Worker secret named GROQ_API_KEY.
  */
-import { cannedLimitReply, cleanReply, groqPayload } from "./persona.js";
+import { cannedBusyReply, cannedLimitReply, cleanReply, groqPayload } from "./persona.js";
 
 const ALLOWED_ORIGINS = ["https://hmohyud.github.io", "http://localhost:5173"];
 
@@ -37,14 +37,27 @@ export default {
     }
     const material = typeof body.material === "string" ? body.material : "";
 
-    const upstream = await fetch("https://api.groq.com/openai/v1/chat/completions", {
-      method: "POST",
-      headers: {
-        "content-type": "application/json",
-        authorization: `Bearer ${env.GROQ_API_KEY}`,
-      },
-      body: JSON.stringify(groqPayload(history, material)),
-    });
+    const callGroq = () =>
+      fetch("https://api.groq.com/openai/v1/chat/completions", {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          authorization: `Bearer ${env.GROQ_API_KEY}`,
+        },
+        body: JSON.stringify(groqPayload(history, material)),
+      });
+
+    let upstream = await callGroq();
+    /* transient overload: one quick retry before giving up */
+    if (upstream.status >= 500) {
+      await new Promise((r) => setTimeout(r, 500));
+      upstream = await callGroq();
+    }
+    if (upstream.status >= 500) {
+      return new Response(JSON.stringify({ reply: cannedBusyReply() }), {
+        headers: { ...cors, "content-type": "application/json" },
+      });
+    }
 
     if (upstream.status === 429) {
       /* Rate limited. Daily vs per-minute comes from Groq's error text;

@@ -8,14 +8,18 @@
  * deployed Cloudflare Worker (VITE_CHAT_URL). No URL configured → the
  * whole chat UI stays hidden.
  */
-const ENDPOINT = import.meta.env.DEV ? "/api/chat" : import.meta.env.VITE_CHAT_URL || "";
+/* Dev talks to Vite's local proxy first (instant persona iteration), then
+   falls back to the deployed worker — so a loaded page keeps working even
+   if the dev server is stopped. Production goes straight to the worker. */
+const WORKER_URL = import.meta.env.VITE_CHAT_URL || "";
+const ENDPOINTS = (import.meta.env.DEV ? ["/api/chat", WORKER_URL] : [WORKER_URL]).filter(Boolean);
 const STORE_KEY = "simon-chat-history";
 const MAX_STORED = 200;
 
 export function initChat({ onThinking, onReply, getMaterial } = {}) {
   const root = document.getElementById("chat");
   if (!root) return;
-  if (!ENDPOINT) {
+  if (!ENDPOINTS.length) {
     root.remove();
     return;
   }
@@ -84,28 +88,35 @@ export function initChat({ onThinking, onReply, getMaterial } = {}) {
     save();
     if (historyEl.classList.contains("open")) renderLog();
 
-    try {
-      const res = await fetch(ENDPOINT, {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({
-          messages: history.slice(-10).map((m) => ({ role: m.role, content: m.content })),
-          material: getMaterial ? getMaterial() : "",
-        }),
-      });
-      const data = await res.json();
-      const reply = res.ok && data.reply ? data.reply : "…the stone is tired. try again in a bit.";
-      history.push({ role: "assistant", content: reply });
-      save();
-      replyEl.textContent = reply;
-      if (historyEl.classList.contains("open")) renderLog();
-      onReply?.();
-    } catch {
-      replyEl.textContent = "…the stone is tired. try again in a bit.";
-    } finally {
-      root.classList.remove("busy");
-      busy = false;
-      input.focus();
+    const payload = JSON.stringify({
+      messages: history.slice(-10).map((m) => ({ role: m.role, content: m.content })),
+      material: getMaterial ? getMaterial() : "",
+    });
+    let reply = "";
+    for (const endpoint of ENDPOINTS) {
+      try {
+        const res = await fetch(endpoint, {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: payload,
+        });
+        const data = await res.json();
+        if (res.ok && data.reply) {
+          reply = data.reply;
+          break;
+        }
+      } catch {
+        /* endpoint unreachable — try the next one */
+      }
     }
+    if (!reply) reply = "…the stone is tired. try again in a bit.";
+    history.push({ role: "assistant", content: reply });
+    save();
+    replyEl.textContent = reply;
+    if (historyEl.classList.contains("open")) renderLog();
+    onReply?.();
+    root.classList.remove("busy");
+    busy = false;
+    input.focus();
   });
 }

@@ -80,6 +80,18 @@ const LIMIT_LINES = {
   ],
 };
 
+/* Transient upstream hiccups (5xx, overload) — one retry happens first;
+   if it still fails, Simon stays in character instead of erroring. */
+const BUSY_LINES = [
+  "Say that again in a couple seconds. I was busy being admired.",
+  "Hang on, my head's spinning — literally. Go again in a moment.",
+  "Something in here just hiccuped and it wasn't me. Try that again.",
+];
+
+export function cannedBusyReply() {
+  return BUSY_LINES[Math.floor(Math.random() * BUSY_LINES.length)];
+}
+
 export function cannedLimitReply(daily, lightUser) {
   const pool = daily
     ? lightUser
