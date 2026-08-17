@@ -1,0 +1,127 @@
+* {
+  margin: 0;
+  padding: 0;
+  box-sizing: border-box;
+}
+
+html,
+body {
+  height: 100%;
+  overflow: hidden;
+  background: #0a0b0e;
+}
+
+/* Deep gallery backdrop: a soft cool pool of light sits slightly above centre,
+   where the head floats, and falls away to near-black at the edges. */
+#backdrop {
+  position: fixed;
+  inset: 0;
+  background: radial-gradient(
+    120vmax 90vmax at 50% 38%,
+    #23262d 0%,
+    #14161a 45%,
+    #0a0b0e 100%
+  );
+}
+#backdrop::after {
+  content: "";
+  position: fixed;
+  inset: 0;
+  background: radial-gradient(
+    46vmin 60vmin at 50% 42%,
+    rgba(190, 205, 230, 0.1),
+    transparent 70%
+  );
+}
+
+#stage {
+  position: fixed;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  display: block;
+  touch-action: none;
+  cursor: grab;
+}
+#stage.dragging {
+  cursor: grabbing;
+}
+
+/* Film grain keeps the huge dark gradient from banding on cheap panels. */
+#grain {
+  position: fixed;
+  inset: 0;
+  pointer-events: none;
+  opacity: 0.045;
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='160' height='160'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='2'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)'/%3E%3C/svg%3E");
+}
+
+#loading {
+  position: fixed;
+  inset: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 18px;
+  align-items: center;
+  justify-content: center;
+  z-index: 3;
+  transition: opacity 0.8s ease;
+}
+#loading.done {
+  opacity: 0;
+  pointer-events: none;
+}
+#load-label {
+  color: #8b93a1;
+  font: 500 13px/1.6 ui-serif, Georgia, "Times New Roman", serif;
+  letter-spacing: 0.18em;
+  animation: pulse 1.8s ease-in-out infinite;
+}
+@keyframes pulse {
+  50% {
+    opacity: 0.4;
+  }
+}
+#load-bar {
+  width: 180px;
+  height: 2px;
+  background: rgba(150, 160, 175, 0.18);
+  border-radius: 1px;
+  overflow: hidden;
+}
+#load-bar i {
+  display: block;
+  height: 100%;
+  width: 0%;
+  background: linear-gradient(90deg, #6d7684, #b9c2d0);
+  border-radius: 1px;
+  transition: width 0.25s ease;
+}
+
+/* Museum placard, revealed once the head has risen into place. */
+#placard {
+  position: fixed;
+  left: 50%;
+  bottom: 4.5vh;
+  transform: translateX(-50%);
+  text-align: center;
+  color: #9aa2ae;
+  font: 400 13px/1.9 ui-serif, Georgia, "Times New Roman", serif;
+  letter-spacing: 0.34em;
+  text-transform: uppercase;
+  text-indent: 0.34em; /* recentre: letter-spacing pads the right edge only */
+  opacity: 0;
+  transition: opacity 1.4s ease 0.5s;
+  user-select: none;
+  -webkit-user-select: none;
+}
+#placard small {
+  display: block;
+  font-size: 10px;
+  letter-spacing: 0.24em;
+  text-indent: 0.24em;
+  color: #5d646f;
+}
+body.ready #placard {
+  opacity: 1;
+}
