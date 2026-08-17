@@ -39,8 +39,9 @@ if (!input) {
 
 // Triangle budget after the re-solidify: the voxel resolution — not this —
 // is the detail ceiling, so decimating the remesh output to this level is
-// visually lossless while keeping the file lean.
-const TARGET_TRIANGLES = 1_200_000;
+// visually lossless while keeping the file lean. TARGET_TRIS overrides for
+// LOD builds (e.g. TARGET_TRIS=300000 for the mobile model).
+const TARGET_TRIANGLES = process.env.TARGET_TRIS ? parseInt(process.env.TARGET_TRIS, 10) : 1_200_000;
 
 /* Watertight recast: after visibility extraction the bust is clean but has
    small genuine holes (nostrils, ear canals, scan gaps). Voxelising the
@@ -740,16 +741,13 @@ if (process.env.SKIP_AO !== "1") {
   }
 
   /* AO only needs coarse occlusion, so the rays are cast against a
-     decimated proxy of the mesh — ~5x smaller BVH, same shadows. */
+     decimated proxy of the mesh — ~5x smaller BVH, same shadows. (Skipped
+     when the mesh is already at or below proxy size, e.g. LOD builds.) */
   const fullIdx = fidx.getArray();
-  const [proxyIdx] = MeshoptSimplifier.simplify(
-    fullIdx instanceof Uint32Array ? fullIdx : Uint32Array.from(fullIdx),
-    fpos.getArray(),
-    3,
-    350_000 * 3,
-    0.01,
-    []
-  );
+  let proxyIdx = fullIdx instanceof Uint32Array ? fullIdx : Uint32Array.from(fullIdx);
+  if (proxyIdx.length > 350_000 * 3) {
+    [proxyIdx] = MeshoptSimplifier.simplify(proxyIdx, fpos.getArray(), 3, 350_000 * 3, 0.01, []);
+  }
   const geometry = new THREE.BufferGeometry();
   geometry.setAttribute("position", new THREE.BufferAttribute(fpos.getArray().slice(), 3));
   geometry.setIndex(new THREE.BufferAttribute(proxyIdx, 1));

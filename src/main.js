@@ -21,9 +21,14 @@ import { RoomEnvironment } from "three/addons/environments/RoomEnvironment.js";
 /* Dev A/B hook: ?m=original.glb loads the raw Meshy export with its own
    materials untouched, to compare against what external viewers show. */
 const DEV_MODEL = import.meta.env.DEV ? new URLSearchParams(location.search).get("m") : null;
+/* Mobile devices get a lighter everything: a 300k-triangle LOD model, a
+   pixel-ratio cap, a 3-octave marble shader and a smaller shadow map. The
+   look survives; the frame time doesn't notice the screen is retina. */
+const IS_MOBILE = window.matchMedia("(pointer: coarse)").matches;
+
 const MODEL_URL =
   import.meta.env.BASE_URL +
-  (DEV_MODEL || "simon.glb") +
+  (DEV_MODEL || (IS_MOBILE ? "simon_mobile.glb" : "simon.glb")) +
   (import.meta.env.DEV ? `?v=${Date.now()}` : "");
 const HEAD_HEIGHT = 2.3; // world units the head is normalised to
 const CAMERA_FOV = 38;
@@ -41,7 +46,8 @@ const loadBarFill = document.querySelector("#load-bar i");
 const reduced = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
 
 const renderer = new THREE.WebGLRenderer({ canvas, antialias: true, alpha: true });
-renderer.setPixelRatio(Math.min(2, window.devicePixelRatio || 1));
+const MAX_DPR = IS_MOBILE ? 1.5 : 2;
+renderer.setPixelRatio(Math.min(MAX_DPR, window.devicePixelRatio || 1));
 renderer.toneMapping = THREE.ACESFilmicToneMapping;
 renderer.toneMappingExposure = 1.15;
 /* Cavity shading comes from the baked (raytraced) per-vertex AO; the shadow
@@ -75,7 +81,7 @@ new RGBELoader().load(import.meta.env.BASE_URL + "studio_small_08_2k.hdr", (tex)
    cool — so both silhouette edges catch light against the dark page. */
 const key = new THREE.DirectionalLight(0xfff4e6, 1.1);
 key.position.set(1.8, 2.2, 3.2);
-key.shadow.mapSize.set(2048, 2048);
+key.shadow.mapSize.set(IS_MOBILE ? 1024 : 2048, IS_MOBILE ? 1024 : 2048);
 key.shadow.camera.near = 0.5;
 key.shadow.camera.far = 12;
 key.shadow.camera.left = -1.9;
@@ -127,7 +133,7 @@ float marbleNoise(vec3 x) {
 float marbleFbm(vec3 p) {
   float v = 0.0;
   float a = 0.5;
-  for (int i = 0; i < 5; i++) {
+  for (int i = 0; i < ${IS_MOBILE ? 3 : 5}; i++) {
     v += a * marbleNoise(p);
     p = p * 2.02 + vec3(13.7);
     a *= 0.5;
@@ -147,9 +153,13 @@ const MARBLE_COLOR_CHUNK = /* glsl */ `
   float turb = marbleFbm(q * 1.6);
   float band = sin(q.x * 1.1 + q.y * 2.2 + q.z * 0.7 + turb * 7.0);
   marbleVein = pow(1.0 - abs(band), 6.0);
-  float micro = marbleFbm(q * 5.5 + 11.7);
+${
+  IS_MOBILE
+    ? "  float thin = 0.0; /* mobile: skip the fine vein family (2 fbm chains) */"
+    : `  float micro = marbleFbm(q * 5.5 + 11.7);
   float gate = smoothstep(0.32, 0.62, marbleFbm(q * 2.4 + 4.2));
-  float thin = pow(1.0 - abs(sin(q.y * 4.6 + q.x * 1.8 + micro * 9.0)), 24.0) * gate;
+  float thin = pow(1.0 - abs(sin(q.y * 4.6 + q.x * 1.8 + micro * 9.0)), 24.0) * gate;`
+}
   marbleCloud = marbleFbm(q * 1.2 + 7.0);
 
   /* two deliberate accent seams, placed to cross the face: one diagonal
@@ -438,7 +448,7 @@ function makeMarbleMaterial(hasAO) {
     color: 0xffffff, // real albedo lives in the marble shader (~0.9 ivory)
     roughness: 0.14,
     metalness: 0.0,
-    clearcoat: 0.4,
+    clearcoat: IS_MOBILE ? 0.0 : 0.4, // second specular lobe is desktop-only
     clearcoatRoughness: 0.08,
     envMapIntensity: 1.0,
     /* the scan's few natural holes (nostrils, ears) should show shadowed
@@ -649,9 +659,39 @@ layout();
 const easeOutCubic = (t) => 1 - Math.pow(1 - t, 3);
 let last = 0;
 
+/* Adaptive resolution governor: when the smoothed frame time sags, step the
+   render resolution down a notch (down to a floor); when there's headroom,
+   step back up toward the device cap. Resolution is the knob users notice
+   least and GPUs notice most. */
+const perf = {
+  ema: 16,
+  dpr: Math.min(MAX_DPR, window.devicePixelRatio || 1),
+  cooldown: 0,
+};
+function governor(dtMs) {
+  perf.ema += (dtMs - perf.ema) * 0.05;
+  if (perf.cooldown > 0) {
+    perf.cooldown--;
+    return;
+  }
+  if (perf.ema > 24 && perf.dpr > 1.0) {
+    perf.dpr = Math.max(1.0, perf.dpr - 0.25);
+    renderer.setPixelRatio(perf.dpr);
+    layout();
+    perf.cooldown = 120; // ~2s before judging again
+  } else if (perf.ema < 12.5 && perf.dpr < Math.min(MAX_DPR, window.devicePixelRatio || 1)) {
+    perf.dpr = Math.min(MAX_DPR, perf.dpr + 0.25);
+    renderer.setPixelRatio(perf.dpr);
+    layout();
+    perf.cooldown = 300; // climb back cautiously
+  }
+}
+
 renderer.setAnimationLoop((t) => {
-  const dt = last ? Math.min(0.05, (t - last) / 1000) : 0.016;
+  const rawDt = last ? t - last : 16;
+  const dt = last ? Math.min(0.05, rawDt / 1000) : 0.016;
   last = t;
+  if (state.loaded) governor(rawDt);
 
   const s = state;
 
