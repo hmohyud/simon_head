@@ -44,8 +44,11 @@ const renderer = new THREE.WebGLRenderer({ canvas, antialias: true, alpha: true 
 renderer.setPixelRatio(Math.min(2, window.devicePixelRatio || 1));
 renderer.toneMapping = THREE.ACESFilmicToneMapping;
 renderer.toneMappingExposure = 1.15;
-/* No shadow maps: cavity shading comes from the baked per-vertex AO, and a
-   shadow pass would re-render the 2M-triangle mesh every frame. */
+/* Cavity shading comes from the baked (raytraced) per-vertex AO; the shadow
+   map is an optional extra depth pass, toggleable because it re-renders the
+   whole sculpture per frame — on by default only where GPUs can afford it. */
+renderer.shadowMap.enabled = false;
+renderer.shadowMap.type = THREE.PCFSoftShadowMap;
 
 const scene = new THREE.Scene();
 const camera = new THREE.PerspectiveCamera(CAMERA_FOV, 1, 0.1, 100);
@@ -73,7 +76,34 @@ new RGBELoader().load(import.meta.env.BASE_URL + "studio_small_08_2k.hdr", (tex)
    cool — so both silhouette edges catch light against the dark page. */
 const key = new THREE.DirectionalLight(0xfff4e6, 1.1);
 key.position.set(1.8, 2.2, 3.2);
+key.shadow.mapSize.set(2048, 2048);
+key.shadow.camera.near = 0.5;
+key.shadow.camera.far = 12;
+key.shadow.camera.left = -1.9;
+key.shadow.camera.right = 1.9;
+key.shadow.camera.top = 1.9;
+key.shadow.camera.bottom = -1.9;
+key.shadow.bias = -0.0002;
+key.shadow.normalBias = 0.03;
 scene.add(key);
+
+function setShadows(on) {
+  renderer.shadowMap.enabled = on;
+  key.castShadow = on;
+  for (const mesh of viewer.meshes) {
+    mesh.castShadow = on;
+    mesh.receiveShadow = on;
+  }
+  /* toggling the shadow pipeline requires shader recompiles */
+  const mats = [viewer.marbleMaterial, ...Object.values(viewer.textured).map((e) => e.material)];
+  for (const m of mats) if (m) m.needsUpdate = true;
+  viewer.shadowsOn = on;
+  const btn = document.getElementById("shadow-toggle");
+  if (btn) btn.classList.toggle("on", on);
+}
+document.getElementById("shadow-toggle").addEventListener("click", () => {
+  setShadows(!viewer.shadowsOn);
+});
 
 const rimWarm = new THREE.DirectionalLight(0xffd9b0, 2.4);
 rimWarm.position.set(-3.2, 1.2, -2.2);
@@ -211,7 +241,6 @@ const TEXTURE_VARIANTS = {
   tiles: { scale: 0.55, metalness: 0.0, clearcoat: 0.35, relief: 0.6 },
   metal: { scale: 0.6, metalness: 1.0, clearcoat: 0.0, relief: 0.7 },
   stucco: { scale: 0.8, metalness: 0.0, clearcoat: 0.0, relief: 0.8 },
-  wicker: { scale: 0.9, metalness: 0.0, clearcoat: 0.0, relief: 1.0 },
 };
 
 /* The museum rig (dim key, two loud coloured rims, fresnel glow) is a
@@ -558,6 +587,8 @@ loader.load(
     loadingEl.classList.add("done");
     document.body.classList.add("ready");
     if (viewer.pendingVariant) selectVariant(viewer.pendingVariant);
+    /* shadows on by default where a discrete-GPU-class device is likely */
+    if (window.matchMedia("(pointer: fine)").matches) setShadows(true);
     if (import.meta.env.DEV)
       window.__d = { renderer, scene, camera, head, state, material, THREE, fit: { center, scale } };
   },
