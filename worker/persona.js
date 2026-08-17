@@ -35,6 +35,45 @@ export function groqPayload(history) {
   };
 }
 
+/* Canned in-character lines for Groq rate limits. Two axes: minute-limit
+   (transient) vs daily (out till midnight UTC), and whether THIS visitor
+   has actually been talking much — the limits are shared across everyone
+   on the site, so someone two messages in gets blamed on "someone else",
+   not accused of burning Simon's words. */
+const LIMIT_LINES = {
+  minuteHeavy: [
+    "Jesus, breathe. You talk so much I literally ran out of words. Give me a minute.",
+    "Slow down. Even I need a second to be this good. Try again in a minute.",
+    "You've been yapping nonstop and now my throat's dry. One minute. Go reflect.",
+  ],
+  minuteLight: [
+    "Not you — some other clown on here is blowing up my phone right now. Give it a minute.",
+    "Hold on, I'm apparently popular today and someone else used up my breath. Try again in a minute.",
+    "Some other visitor is wasting my words as we speak. Give me a minute to shake them off.",
+  ],
+  dayHeavy: [
+    "Congratulations, you actually talked me dry for the whole day. Impressive and sad. Come back tomorrow.",
+    "That's it, I'm out of words until tomorrow, and it's entirely your fault. Reflect on that.",
+    "You used up everything I had to say today. Go outside. Try me tomorrow.",
+  ],
+  dayLight: [
+    "Someone else already talked me dry today, believe it or not. I'm out of words until tomorrow.",
+    "I'd love to insult you properly but some other clown used up my whole day's voice. Come back tomorrow.",
+    "Out of words for today — not your doing, for once. Try me tomorrow.",
+  ],
+};
+
+export function cannedLimitReply(daily, lightUser) {
+  const pool = daily
+    ? lightUser
+      ? LIMIT_LINES.dayLight
+      : LIMIT_LINES.dayHeavy
+    : lightUser
+      ? LIMIT_LINES.minuteLight
+      : LIMIT_LINES.minuteHeavy;
+  return pool[Math.floor(Math.random() * pool.length)];
+}
+
 export function cleanReply(text) {
   const stripped = String(text ?? "")
     .replace(/<think>[\s\S]*?<\/think>/gi, "")

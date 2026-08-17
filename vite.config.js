@@ -1,5 +1,5 @@
 import { defineConfig, loadEnv } from "vite";
-import { cleanReply, groqPayload } from "./worker/persona.js";
+import { cannedLimitReply, cleanReply, groqPayload } from "./worker/persona.js";
 
 /* Dev-only stand-in for the Cloudflare Worker: proxies /api/chat to Groq
    using GROQ_API_KEY from .env.local (never exposed to the client — no
@@ -33,6 +33,13 @@ function chatDevProxy(apiKey) {
               },
               body: JSON.stringify(groqPayload(history)),
             });
+            if (upstream.status === 429) {
+              const errText = await upstream.text();
+              const daily = /per day|TPD|RPD/i.test(errText);
+              const lightUser = history.filter((m) => m.role === "user").length <= 2;
+              res.end(JSON.stringify({ reply: cannedLimitReply(daily, lightUser) }));
+              return;
+            }
             if (!upstream.ok) {
               res.statusCode = 502;
               res.end(JSON.stringify({ error: `groq ${upstream.status}` }));
