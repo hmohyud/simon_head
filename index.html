@@ -21,6 +21,13 @@
       <button class="swatch tex" data-variant="stucco" title="Stucco" style="background-image: url(textures/stucco/albedo.jpg)"></button>
     </div>
     <div id="chat">
+      <div id="chat-history">
+        <div id="chat-history-bar">
+          <span>this stays in your browser</span>
+          <button id="chat-clear" type="button">clear</button>
+        </div>
+        <div id="chat-log"></div>
+      </div>
       <div id="chat-reply" aria-live="polite"></div>
       <form id="chat-form" autocomplete="off">
         <input
@@ -30,6 +37,7 @@
           maxlength="240"
           autocomplete="off"
         />
+        <button id="chat-history-btn" type="button" title="chat history"></button>
       </form>
     </div>
     <script type="module" src="/src/main.js"></script>
