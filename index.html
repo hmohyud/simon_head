@@ -20,6 +20,18 @@
       <button class="swatch tex" data-variant="metal" title="Patchy Metal" style="background-image: url(textures/metal/albedo.jpg)"></button>
       <button class="swatch tex" data-variant="stucco" title="Stucco" style="background-image: url(textures/stucco/albedo.jpg)"></button>
     </div>
+    <div id="chat">
+      <div id="chat-reply" aria-live="polite"></div>
+      <form id="chat-form" autocomplete="off">
+        <input
+          id="chat-input"
+          name="message"
+          placeholder="say something to him&hellip;"
+          maxlength="240"
+          autocomplete="off"
+        />
+      </form>
+    </div>
     <script type="module" src="/src/main.js"></script>
   </body>
 </html>

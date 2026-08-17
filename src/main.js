@@ -3,6 +3,7 @@ import { GLTFLoader } from "three/addons/loaders/GLTFLoader.js";
 import { MeshoptDecoder } from "three/addons/libs/meshopt_decoder.module.js";
 import { RGBELoader } from "three/addons/loaders/RGBELoader.js";
 import { RoomEnvironment } from "three/addons/environments/RoomEnvironment.js";
+import { initChat } from "./chat.js";
 
 /**
  * A floating marble head, alone in a dark gallery.
@@ -512,7 +513,17 @@ const state = {
   lastY: 0,
   entrance: 0, // 0 → 1 over the reveal
   loaded: false,
+  excite: 0, // chat reaction: momentarily livelier wobble
 };
+
+initChat({
+  onThinking: () => {
+    state.excite = 0.6;
+  },
+  onReply: () => {
+    state.excite = 1.6;
+  },
+});
 
 const loader = new GLTFLoader();
 loader.setMeshoptDecoder(MeshoptDecoder);
@@ -725,10 +736,13 @@ renderer.setAnimationLoop((t) => {
     head.position.set(0, 0, 0);
   } else {
     /* Idle wobble on incommensurate frequencies so it never visibly loops;
-       layered on top of wherever the head is looking. */
+       layered on top of wherever the head is looking. Chat activity makes
+       him momentarily livelier. */
+    s.excite *= Math.exp(-1.1 * dt);
+    const amp = 1 + s.excite;
     const w = t / 1000;
-    head.rotation.x = s.rotX + Math.cos(w * 0.61) * 0.038 + Math.sin(w * 1.13) * 0.016;
-    head.rotation.y = s.rotY + Math.sin(w * 0.47) * 0.045 + Math.cos(w * 0.91) * 0.018;
+    head.rotation.x = s.rotX + (Math.cos(w * 0.61) * 0.038 + Math.sin(w * 1.13) * 0.016) * amp;
+    head.rotation.y = s.rotY + (Math.sin(w * 0.47) * 0.045 + Math.cos(w * 0.91) * 0.018) * amp;
     head.rotation.z = Math.sin(w * 0.53) * 0.02 + Math.cos(w * 1.27) * 0.008;
     head.position.y = Math.sin(w * 0.79) * 0.045 + Math.sin(w * 1.41) * 0.015;
     head.position.x = Math.cos(w * 0.67) * 0.018;
