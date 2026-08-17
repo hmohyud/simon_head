@@ -98,30 +98,41 @@ body {
   transition: width 0.25s ease;
 }
 
-/* Museum placard, revealed once the head has risen into place. */
-#placard {
+/* Marble variant swatches — little stone dots, bottom right. */
+#marbles {
   position: fixed;
-  left: 50%;
+  right: 3.5vh;
   bottom: 4.5vh;
-  transform: translateX(-50%);
-  text-align: center;
-  color: #9aa2ae;
-  font: 400 13px/1.9 ui-serif, Georgia, "Times New Roman", serif;
-  letter-spacing: 0.34em;
-  text-transform: uppercase;
-  text-indent: 0.34em; /* recentre: letter-spacing pads the right edge only */
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  z-index: 4;
   opacity: 0;
-  transition: opacity 1.4s ease 0.5s;
-  user-select: none;
-  -webkit-user-select: none;
+  transition: opacity 1.4s ease 0.9s;
 }
-#placard small {
-  display: block;
-  font-size: 10px;
-  letter-spacing: 0.24em;
-  text-indent: 0.24em;
-  color: #5d646f;
-}
-body.ready #placard {
+body.ready #marbles {
   opacity: 1;
+}
+.swatch {
+  width: 22px;
+  height: 22px;
+  border-radius: 50%;
+  border: 1px solid rgba(255, 255, 255, 0.25);
+  cursor: pointer;
+  padding: 0;
+  transition: transform 0.2s ease, border-color 0.2s ease, box-shadow 0.2s ease;
+}
+.swatch:hover {
+  transform: scale(1.18);
+}
+.swatch.active {
+  border-color: rgba(255, 255, 255, 0.85);
+  box-shadow: 0 0 0 2px rgba(255, 255, 255, 0.14);
+}
+.swatch[data-variant="carrara"] {
+  background: radial-gradient(circle at 35% 30%, #f2efe8, #ccd1d9 75%);
+}
+.swatch.tex {
+  background-size: cover;
+  background-position: center;
 }

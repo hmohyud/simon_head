@@ -91,6 +91,10 @@ scene.add(bounce);
 
 const MARBLE_GLSL = /* glsl */ `
 varying vec3 vMarblePos;
+uniform vec3 uMarbleBase;
+uniform vec3 uMarbleGrey;
+uniform vec3 uMarbleVein;
+uniform float uVeinGain;
 
 float marbleHash(vec3 p) {
   p = fract(p * 0.3183099 + vec3(0.1, 0.2, 0.3));
@@ -146,12 +150,14 @@ const MARBLE_COLOR_CHUNK = /* glsl */ `
     pow(max(0.0, 1.0 - abs(acc2) * 16.0), 3.0) * 0.65;
   marbleVein = clamp(marbleVein + accent, 0.0, 1.0);
 
-  /* albedo tops out ~0.9 — pure white is non-physical and clips under ACES */
-  vec3 base = vec3(0.900, 0.888, 0.868);   /* warm ivory */
-  vec3 grey = vec3(0.710, 0.730, 0.752);   /* soft clouding */
-  vec3 veinC = vec3(0.400, 0.445, 0.505);  /* slate blue-grey */
-  vec3 marble = mix(base, grey, marbleCloud * 0.45);
-  marble = mix(marble, veinC, clamp(marbleVein * 0.85 + thin * 0.55, 0.0, 1.0));
+  /* stone palette comes from uniforms so marble variants can be switched
+     live; albedos top out ~0.9 — pure white clips under ACES */
+  vec3 marble = mix(uMarbleBase, uMarbleGrey, marbleCloud * 0.45);
+  marble = mix(
+    marble,
+    uMarbleVein,
+    clamp((marbleVein * 0.85 + thin * 0.55) * uVeinGain, 0.0, 1.0)
+  );
   /* any glimpse of the hollow interior reads as shadowed stone */
   if (!gl_FrontFacing) marble *= 0.35;
   diffuseColor.rgb *= marble;
@@ -193,6 +199,219 @@ const MARBLE_AO_CHUNK = /* glsl */ `
    is being dialled in; true renders the procedural marble. */
 const USE_MARBLE = true;
 
+/* Procedural stone palette — the signature Carrara marble. */
+const MARBLES = {
+  carrara: { base: [0.9, 0.888, 0.868], grey: [0.71, 0.73, 0.752], vein: [0.4, 0.445, 0.505], gain: 1.0 },
+};
+
+/* Texture-based variants (A23D 2K JPG sets in public/textures/<slug>/,
+   triplanar-projected — the mesh has no UVs). scale = tiles per world unit;
+   the bust is ~2.3 units tall. */
+const TEXTURE_VARIANTS = {
+  tiles: { scale: 0.55, metalness: 0.0, clearcoat: 0.35, relief: 0.6 },
+  metal: { scale: 0.6, metalness: 1.0, clearcoat: 0.0, relief: 0.7 },
+  stucco: { scale: 0.8, metalness: 0.0, clearcoat: 0.0, relief: 0.8 },
+  wicker: { scale: 0.9, metalness: 0.0, clearcoat: 0.0, relief: 1.0 },
+};
+
+/* The museum rig (dim key, two loud coloured rims, fresnel glow) is a
+   white-marble costume — mid-tone textured materials under it look oddly
+   edge-lit. Each variant type gets its own light profile, eased to. */
+const LIGHT_PROFILES = {
+  marble: { key: 1.1, rimWarm: 2.4, rimCool: 2.8, env: 1.0, bounce: 0.5 },
+  textured: { key: 2.1, rimWarm: 0.9, rimCool: 1.1, env: 1.15, bounce: 0.7 },
+};
+const lightTarget = { ...LIGHT_PROFILES.marble };
+
+/* current selection + live uniform handles (set when the shader compiles);
+   the render loop eases the palette toward the target so switches pour in
+   rather than snapping */
+const marbleState = {
+  current: "carrara",
+  uniforms: null,
+  target: {
+    base: new THREE.Color(...MARBLES.carrara.base),
+    grey: new THREE.Color(...MARBLES.carrara.grey),
+    vein: new THREE.Color(...MARBLES.carrara.vein),
+    gain: MARBLES.carrara.gain,
+  },
+};
+
+function setMarble(name) {
+  const m = MARBLES[name];
+  if (!m) return;
+  marbleState.current = name;
+  marbleState.target.base.setRGB(...m.base);
+  marbleState.target.grey.setRGB(...m.grey);
+  marbleState.target.vein.setRGB(...m.vein);
+  marbleState.target.gain = m.gain;
+}
+
+/* ---------- variant switching (procedural marbles + textured) ---------- */
+
+const viewer = {
+  meshes: [],
+  hasAO: false,
+  marbleMaterial: null,
+  textured: {}, // slug -> { material, ready, wanted }
+  pendingVariant: null,
+};
+
+const TRIPLANAR_GLSL = /* glsl */ `
+varying vec3 vTriPos;
+varying vec3 vObjNormal;
+uniform sampler2D uTexAlbedo;
+uniform sampler2D uTexRough;
+uniform sampler2D uTexNormal;
+uniform float uTexScale;
+uniform float uRelief;
+uniform mat3 normalMatrix;
+
+vec3 triWeights() {
+  vec3 w = pow(abs(normalize(vObjNormal)), vec3(4.0));
+  return w / (w.x + w.y + w.z);
+}
+vec3 triSample(sampler2D map, vec3 w) {
+  vec3 p = vTriPos * uTexScale;
+  return texture2D(map, p.zy).rgb * w.x +
+         texture2D(map, p.xz).rgb * w.y +
+         texture2D(map, p.xy).rgb * w.z;
+}
+`;
+
+function makeTexturedMaterial(slug, cfg, hasAO, onReady) {
+  const dir = import.meta.env.BASE_URL + "textures/" + slug + "/";
+  const manager = new THREE.LoadingManager(onReady);
+  const loader = new THREE.TextureLoader(manager);
+  const tex = (file, srgb) => {
+    const t = loader.load(dir + file);
+    t.wrapS = t.wrapT = THREE.RepeatWrapping;
+    t.anisotropy = 8;
+    if (srgb) t.colorSpace = THREE.SRGBColorSpace;
+    return t;
+  };
+  const albedo = tex("albedo.jpg", true);
+  const rough = tex("roughness.jpg", false);
+  const normalMap = tex("normal.jpg", false);
+
+  const material = new THREE.MeshPhysicalMaterial({
+    color: 0xffffff,
+    roughness: 1.0, // acts as a multiplier on the roughness map
+    metalness: cfg.metalness,
+    clearcoat: cfg.clearcoat,
+    clearcoatRoughness: 0.15,
+    envMapIntensity: 1.0,
+    side: THREE.DoubleSide,
+  });
+  material.onBeforeCompile = (shader) => {
+    shader.uniforms.uTexAlbedo = { value: albedo };
+    shader.uniforms.uTexRough = { value: rough };
+    shader.uniforms.uTexNormal = { value: normalMap };
+    shader.uniforms.uTexScale = { value: cfg.scale };
+    shader.uniforms.uRelief = { value: cfg.relief };
+    shader.vertexShader = shader.vertexShader
+      .replace(
+        "#include <common>",
+        "#include <common>\nvarying vec3 vTriPos;\nvarying vec3 vObjNormal;" +
+          (hasAO ? "\nvarying float vAO;\nattribute vec3 color;" : "")
+      )
+      .replace(
+        "#include <beginnormal_vertex>",
+        "#include <beginnormal_vertex>\nvObjNormal = objectNormal;"
+      )
+      .replace(
+        "#include <begin_vertex>",
+        "#include <begin_vertex>\nvTriPos = transformed;" + (hasAO ? "\nvAO = color.r;" : "")
+      );
+    shader.fragmentShader = shader.fragmentShader
+      .replace(
+        "#include <common>",
+        "#include <common>\n" + (hasAO ? "varying float vAO;\n" : "") + TRIPLANAR_GLSL
+      )
+      .replace(
+        "#include <color_fragment>",
+        /* glsl */ `#include <color_fragment>
+{
+  vec3 twc = triWeights();
+  vec3 alb = triSample(uTexAlbedo, twc);
+  if (!gl_FrontFacing) alb *= 0.35;
+  diffuseColor.rgb *= alb;
+}`
+      )
+      .replace(
+        "float roughnessFactor = roughness;",
+        /* glsl */ `float roughnessFactor = clamp(triSample(uTexRough, triWeights()).r * roughness, 0.04, 1.0);`
+      )
+      .replace(
+        "#include <normal_fragment_maps>",
+        /* glsl */ `{
+  vec3 gn = normalize(vObjNormal) * (gl_FrontFacing ? 1.0 : -1.0);
+  vec3 twn = pow(abs(gn), vec3(4.0));
+  twn /= (twn.x + twn.y + twn.z);
+  vec3 tpn = vTriPos * uTexScale;
+  vec3 tnx = texture2D(uTexNormal, tpn.zy).xyz * 2.0 - 1.0;
+  vec3 tny = texture2D(uTexNormal, tpn.xz).xyz * 2.0 - 1.0;
+  vec3 tnz = texture2D(uTexNormal, tpn.xy).xyz * 2.0 - 1.0;
+  /* whiteout blend (Golus): keep each plane's tangent detail, swizzle into
+     object space, weight by facing */
+  tnx = vec3(tnx.xy + gn.zy, abs(tnx.z) * gn.x);
+  tny = vec3(tny.xy + gn.xz, abs(tny.z) * gn.y);
+  tnz = vec3(tnz.xy + gn.xy, abs(tnz.z) * gn.z);
+  vec3 objN = normalize(tnx.zyx * twn.x + tny.xzy * twn.y + tnz.xyz * twn.z);
+  objN = normalize(mix(gn, objN, uRelief));
+  normal = normalize(normalMatrix * objN);
+}`
+      );
+    if (hasAO) {
+      shader.fragmentShader = shader.fragmentShader.replace(
+        "#include <aomap_fragment>",
+        MARBLE_AO_CHUNK
+      );
+    }
+  };
+  return material;
+}
+
+function applyMaterial(material) {
+  for (const mesh of viewer.meshes) mesh.material = material;
+}
+
+function selectVariant(name) {
+  document.querySelectorAll(".swatch").forEach((b) => {
+    b.classList.toggle("active", b.dataset.variant === name);
+  });
+  Object.assign(lightTarget, LIGHT_PROFILES[MARBLES[name] ? "marble" : "textured"]);
+  if (!viewer.meshes.length) {
+    viewer.pendingVariant = name;
+    if (MARBLES[name]) setMarble(name);
+    return;
+  }
+  if (MARBLES[name]) {
+    setMarble(name);
+    applyMaterial(viewer.marbleMaterial);
+    return;
+  }
+  const cfg = TEXTURE_VARIANTS[name];
+  if (!cfg) return;
+  let entry = viewer.textured[name];
+  if (!entry) {
+    entry = viewer.textured[name] = { material: null, ready: false, wanted: true };
+    entry.material = makeTexturedMaterial(name, cfg, viewer.hasAO, () => {
+      entry.ready = true;
+      if (entry.wanted) applyMaterial(entry.material);
+    });
+  } else {
+    entry.wanted = true;
+    if (entry.ready) applyMaterial(entry.material);
+  }
+  /* deselect interest from other pending texture loads */
+  for (const [k, e] of Object.entries(viewer.textured)) if (k !== name) e.wanted = false;
+}
+
+document.querySelectorAll(".swatch").forEach((b) => {
+  b.addEventListener("click", () => selectVariant(b.dataset.variant));
+});
+
 function makeMarbleMaterial(hasAO) {
   if (!USE_MARBLE) {
     return new THREE.MeshStandardMaterial({
@@ -217,6 +436,12 @@ function makeMarbleMaterial(hasAO) {
     side: THREE.DoubleSide,
   });
   material.onBeforeCompile = (shader) => {
+    const start = MARBLES[marbleState.current];
+    shader.uniforms.uMarbleBase = { value: new THREE.Color(...start.base) };
+    shader.uniforms.uMarbleGrey = { value: new THREE.Color(...start.grey) };
+    shader.uniforms.uMarbleVein = { value: new THREE.Color(...start.vein) };
+    shader.uniforms.uVeinGain = { value: start.gain };
+    marbleState.uniforms = shader.uniforms;
     shader.vertexShader = shader.vertexShader
       .replace(
         "#include <common>",
@@ -310,9 +535,9 @@ loader.load(
     const size = box.getSize(new THREE.Vector3());
     const scale = HEAD_HEIGHT / size.y;
 
-    const material = makeMarbleMaterial(
-      geometries.length > 0 && !!geometries[0].getAttribute("color")
-    );
+    viewer.hasAO = geometries.length > 0 && !!geometries[0].getAttribute("color");
+    const material = makeMarbleMaterial(viewer.hasAO);
+    viewer.marbleMaterial = material;
     /* viewer-parity mode: keep the export's own material */
     let origMaterial = null;
     if (DEV_MODEL) {
@@ -325,14 +550,14 @@ loader.load(
       geometry.scale(scale, scale, scale);
       if (!geometry.getAttribute("normal")) geometry.computeVertexNormals();
       const mesh = new THREE.Mesh(geometry, origMaterial ?? material);
-      mesh.castShadow = true;
-      mesh.receiveShadow = true;
       head.add(mesh);
+      viewer.meshes.push(mesh);
     }
 
     state.loaded = true;
     loadingEl.classList.add("done");
     document.body.classList.add("ready");
+    if (viewer.pendingVariant) selectVariant(viewer.pendingVariant);
     if (import.meta.env.DEV)
       window.__d = { renderer, scene, camera, head, state, material, THREE, fit: { center, scale } };
   },
@@ -460,6 +685,26 @@ renderer.setAnimationLoop((t) => {
   head.position.y += (1 - inE) * -0.9;
   const sc = 0.86 + 0.14 * inE;
   head.scale.setScalar(sc);
+
+  /* ease the marble palette toward the selected stone */
+  if (marbleState.uniforms) {
+    const mk = 1 - Math.exp(-5 * dt);
+    const u = marbleState.uniforms;
+    u.uMarbleBase.value.lerp(marbleState.target.base, mk);
+    u.uMarbleGrey.value.lerp(marbleState.target.grey, mk);
+    u.uMarbleVein.value.lerp(marbleState.target.vein, mk);
+    u.uVeinGain.value += (marbleState.target.gain - u.uVeinGain.value) * mk;
+  }
+
+  /* ease the lights toward the active variant's profile */
+  {
+    const lk = 1 - Math.exp(-4 * dt);
+    key.intensity += (lightTarget.key - key.intensity) * lk;
+    rimWarm.intensity += (lightTarget.rimWarm - rimWarm.intensity) * lk;
+    rimCool.intensity += (lightTarget.rimCool - rimCool.intensity) * lk;
+    bounce.intensity += (lightTarget.bounce - bounce.intensity) * lk;
+    scene.environmentIntensity += (lightTarget.env - scene.environmentIntensity) * lk;
+  }
 
   renderer.render(scene, camera);
 });
