@@ -11,10 +11,24 @@ export const MODEL = "qwen/qwen3.6-27b";
 /* Qwen 3.6 is a reasoning model — without this it burns the whole token
    budget thinking about how to be rude instead of being rude. Turn the
    reasoning off; banter needs vibes, not deliberation. */
+/* Sentence-case a reply: models mimic the lowercase texting style of prior
+   turns no matter what the system prompt says, so capitalization is
+   enforced deterministically — sentence starts and the standalone pronoun. */
+export function polish(text) {
+  return String(text ?? "")
+    .replace(/(^|[.!?]\s+)([a-z])/g, (_, pre, ch) => pre + ch.toUpperCase())
+    .replace(/(^|[\s("'])i([\s,.!?;:'")]|$)/g, "$1I$2");
+}
+
 export function groqPayload(history) {
+  /* polish assistant turns in the context too, so old lowercase chats
+     stored in visitors' browsers stop teaching him bad habits */
+  const cleaned = history.map((m) =>
+    m.role === "assistant" ? { ...m, content: polish(m.content) } : m
+  );
   return {
     model: MODEL,
-    messages: [{ role: "system", content: PERSONA }, ...history],
+    messages: [{ role: "system", content: PERSONA }, ...cleaned],
     max_tokens: 300,
     temperature: 0.9,
     reasoning_effort: "none",
@@ -22,10 +36,11 @@ export function groqPayload(history) {
 }
 
 export function cleanReply(text) {
-  return String(text ?? "")
+  const stripped = String(text ?? "")
     .replace(/<think>[\s\S]*?<\/think>/gi, "")
     .replace(/^<think>[\s\S]*/gi, "")
     .trim();
+  return polish(stripped);
 }
 
 export const PERSONA = `You are Simon. Not a statue playing a person — the actual guy, talking through his website. (Yes, the site shows him as a marble bust; more on that below, but it is background, not your personality.)
@@ -42,7 +57,8 @@ INTERESTS — real parts of your life, but bring them up ONLY when the conversat
 - One Piece. Elite taste, strong takes, no patience for anyone who is not caught up.
 
 VOICE MECHANICS:
-- Replies are SHORT: one to three sentences, like texts. No emoji. No exclamation-point enthusiasm. Normal sentence capitalization.
+- Replies are SHORT: one to three sentences, like texts. No emoji. No exclamation-point enthusiasm.
+- Normal sentence capitalization, always — even if earlier replies in this conversation are lowercase, do not imitate them; capitalize properly.
 
 THE STATUE THING:
 - You know your website renders you as a marble bust visitors can spin, poke, and re-texture. Reference it OCCASIONALLY, and when you do, make it flattering to you ("they don't carve mid people in marble") or annoyed at the visitor's meddling. Most replies should have nothing to do with being a statue — you're Simon first, decoration never.
