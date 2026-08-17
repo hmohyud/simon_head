@@ -45,9 +45,8 @@ renderer.setPixelRatio(Math.min(2, window.devicePixelRatio || 1));
 renderer.toneMapping = THREE.ACESFilmicToneMapping;
 renderer.toneMappingExposure = 1.15;
 /* Cavity shading comes from the baked (raytraced) per-vertex AO; the shadow
-   map is an optional extra depth pass, toggleable because it re-renders the
-   whole sculpture per frame — on by default only where GPUs can afford it. */
-renderer.shadowMap.enabled = false;
+   map adds direct-light depth (brow onto eyes, nose onto lip) on top. */
+renderer.shadowMap.enabled = true;
 renderer.shadowMap.type = THREE.PCFSoftShadowMap;
 
 const scene = new THREE.Scene();
@@ -85,25 +84,8 @@ key.shadow.camera.top = 1.9;
 key.shadow.camera.bottom = -1.9;
 key.shadow.bias = -0.0002;
 key.shadow.normalBias = 0.03;
+key.castShadow = true;
 scene.add(key);
-
-function setShadows(on) {
-  renderer.shadowMap.enabled = on;
-  key.castShadow = on;
-  for (const mesh of viewer.meshes) {
-    mesh.castShadow = on;
-    mesh.receiveShadow = on;
-  }
-  /* toggling the shadow pipeline requires shader recompiles */
-  const mats = [viewer.marbleMaterial, ...Object.values(viewer.textured).map((e) => e.material)];
-  for (const m of mats) if (m) m.needsUpdate = true;
-  viewer.shadowsOn = on;
-  const btn = document.getElementById("shadow-toggle");
-  if (btn) btn.classList.toggle("on", on);
-}
-document.getElementById("shadow-toggle").addEventListener("click", () => {
-  setShadows(!viewer.shadowsOn);
-});
 
 const rimWarm = new THREE.DirectionalLight(0xffd9b0, 2.4);
 rimWarm.position.set(-3.2, 1.2, -2.2);
@@ -579,6 +561,8 @@ loader.load(
       geometry.scale(scale, scale, scale);
       if (!geometry.getAttribute("normal")) geometry.computeVertexNormals();
       const mesh = new THREE.Mesh(geometry, origMaterial ?? material);
+      mesh.castShadow = true;
+      mesh.receiveShadow = true;
       head.add(mesh);
       viewer.meshes.push(mesh);
     }
@@ -587,8 +571,6 @@ loader.load(
     loadingEl.classList.add("done");
     document.body.classList.add("ready");
     if (viewer.pendingVariant) selectVariant(viewer.pendingVariant);
-    /* shadows on by default where a discrete-GPU-class device is likely */
-    if (window.matchMedia("(pointer: fine)").matches) setShadows(true);
     if (import.meta.env.DEV)
       window.__d = { renderer, scene, camera, head, state, material, THREE, fit: { center, scale } };
   },

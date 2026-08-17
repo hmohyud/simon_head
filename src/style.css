@@ -98,47 +98,6 @@ body {
   transition: width 0.25s ease;
 }
 
-/* Shadow toggle — a small pill, bottom left. */
-#shadow-toggle {
-  position: fixed;
-  left: 3.5vh;
-  bottom: 4.5vh;
-  z-index: 4;
-  background: none;
-  border: 1px solid rgba(255, 255, 255, 0.22);
-  border-radius: 999px;
-  color: #8b93a1;
-  font: 500 11px/1 ui-serif, Georgia, "Times New Roman", serif;
-  letter-spacing: 0.22em;
-  text-transform: uppercase;
-  padding: 8px 14px 8px 26px;
-  cursor: pointer;
-  opacity: 0;
-  transition: opacity 1.4s ease 0.9s, border-color 0.2s ease, color 0.2s ease;
-}
-#shadow-toggle::before {
-  content: "";
-  position: absolute;
-  left: 10px;
-  top: 50%;
-  width: 8px;
-  height: 8px;
-  margin-top: -4px;
-  border-radius: 50%;
-  background: rgba(255, 255, 255, 0.18);
-  transition: background 0.2s ease;
-}
-#shadow-toggle.on {
-  color: #d6dbe4;
-  border-color: rgba(255, 255, 255, 0.45);
-}
-#shadow-toggle.on::before {
-  background: #cfd8e6;
-}
-body.ready #shadow-toggle {
-  opacity: 1;
-}
-
 /* Marble variant swatches — little stone dots, bottom right. */
 #marbles {
   position: fixed;
