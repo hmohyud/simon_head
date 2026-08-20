@@ -78,14 +78,24 @@
       <div class="sec">
         <div class="btns"><button id="repair">repair gaps</button><button id="unrepair">undo repair</button></div>
         <div class="line"><span>show fixes</span><input id="showfix" type="checkbox" checked /></div>
+        <div class="line"><span>reach through</span><input id="throughfill" type="checkbox" /></div>
+        <div class="row">
+          <span>reach</span><input id="reach" type="range" min="0.003" max="0.03" step="0.001" value="0.008" /><b id="reachv">0.008</b>
+        </div>
         <div class="hint">fills pinholes the brush skipped and drops stray specks, using the mesh's own connectivity. repaired vertices glow white until you untick this.</div>
       </div>
 
       <div class="sec">
-        <div class="btns"><button id="focus">eyes</button><button id="front">front</button><button id="undo">undo</button></div>
-        <div class="btns"><button id="save">export</button><button id="load">import</button><button id="clear">clear</button></div>
+        <div class="btns"><button id="focus">eyes</button><button id="front">front</button><button id="inside">inside</button></div>
+        <div class="line"><span>cut away front</span><input id="cut" type="checkbox" /></div>
+        <div class="row">
+          <span>cut at</span><input id="cutz" type="range" min="0.1" max="0.85" step="0.01" value="0.52" /><b id="cutzv">0.52</b>
+        </div>
+        <div class="hint">inside puts the camera in the socket looking out, so you can paint the underside of the lashes. cut away slices off the front of the head instead, if you would rather stay outside.</div>
+        <div class="btns"><button id="undo">undo</button><button id="save">export</button><button id="load">import</button></div>
+        <div class="btns"><button id="clear">clear</button></div>
         <div class="hint" id="hint">
-          drag on the face to paint · right-drag orbits · wheel zooms · painting is saved in this browser automatically
+          left-drag paints · middle-drag moves the camera · right-drag orbits · wheel zooms · painting saves itself in this browser
         </div>
       </div>
     </div>
@@ -127,7 +137,11 @@
       const statusEl = document.getElementById("status");
       const say = (m) => (statusEl.textContent = m);
 
+      /* kept disabled until the cut-away is switched on */
+      const clipPlane = new THREE.Plane(new THREE.Vector3(0, 0, -1), 10);
+
       const renderer = new THREE.WebGLRenderer({ antialias: true });
+      renderer.localClippingEnabled = true;
       renderer.setPixelRatio(Math.min(2, devicePixelRatio || 1));
       renderer.setSize(innerWidth, innerHeight);
       renderer.toneMapping = THREE.ACESFilmicToneMapping;
@@ -141,12 +155,16 @@
       const controls = new OrbitControls(camera, renderer.domElement);
       controls.enableDamping = true;
       controls.target.set(0, 0.2, 0);
-      /* left button paints, so orbiting moves to the right button */
+      /* left button paints, so navigation moves to the other two: middle
+         slides the camera through space (essential once you are inside the
+         head), right orbits, wheel zooms */
       controls.mouseButtons = {
         LEFT: null,
-        MIDDLE: THREE.MOUSE.DOLLY,
+        MIDDLE: THREE.MOUSE.PAN,
         RIGHT: THREE.MOUSE.ROTATE,
       };
+      controls.screenSpacePanning = true; // pan along the view plane, not the ground
+      controls.minDistance = 0.02; // let the camera get right up to the lashes
 
       scene.add(new THREE.HemisphereLight(0xffffff, 0x30343c, 1.5));
       const key1 = new THREE.DirectionalLight(0xffffff, 1.6);
@@ -194,6 +212,9 @@
         labelsBox.appendChild(row);
         counters.push(row.querySelector(".n"));
       });
+
+      const reachEl = document.getElementById("reach");
+      reachEl.oninput = () => (document.getElementById("reachv").textContent = (+reachEl.value).toFixed(3));
 
       const brush = document.getElementById("brush");
       const brushv = document.getElementById("brushv");
@@ -255,7 +276,13 @@
 
             mesh = new THREE.Mesh(
               geo,
-              new THREE.MeshStandardMaterial({ vertexColors: true, roughness: 0.75, metalness: 0 })
+              new THREE.MeshStandardMaterial({
+                vertexColors: true,
+                roughness: 0.75,
+                metalness: 0,
+                side: THREE.DoubleSide, // the underside of a lash is a backface
+                clippingPlanes: [clipPlane],
+              })
             );
             scene.add(mesh);
             basePositions = geo.getAttribute("position").array.slice();
@@ -395,7 +422,13 @@
         if (!mesh) return null;
         ndc.set((e.clientX / innerWidth) * 2 - 1, -(e.clientY / innerHeight) * 2 + 1);
         ray.setFromCamera(ndc, camera);
-        return ray.intersectObject(mesh, false)[0] ?? null;
+        /* firstHitOnly is switched off while cutting away, so that hits the
+           clip plane has hidden can be stepped over rather than painted on */
+        ray.firstHitOnly = !cutting;
+        const hits = ray.intersectObject(mesh, false);
+        if (!cutting) return hits[0] ?? null;
+        for (const h of hits) if (h.point.z <= clipPlane.constant) return h;
+        return null;
       }
 
       function dab(hit) {
@@ -504,6 +537,38 @@
           }
         }
 
+        /* Thin features have a far face the brush never reached: for each
+           painted vertex, look a little way through the surface for
+           unpainted vertices whose normal opposes it. That is the underside
+           of a lash (or the back of a lid), and leaving it unpainted is what
+           anchors the lash while the rest of it travels. */
+        let through = 0;
+        if (document.getElementById("throughfill").checked) {
+          const nrm = mesh.geometry.getAttribute("normal");
+          const reach = +document.getElementById("reach").value;
+          /* Only the moving parts reach through, and lashes claim first.
+             The eye surface must NOT seed: it sits a hair behind the lid
+             with an opposing normal, so it would claim the lid underside
+             and pin the very geometry this is meant to free. */
+          const seeds = [];
+          for (const want of [4, 2, 3]) {
+            for (let i = 0; i < n; i++) if (work[i] === want) seeds.push(i);
+          }
+          const probe = new THREE.Vector3();
+          for (const i of seeds) {
+            probe.set(basePositions[i * 3], basePositions[i * 3 + 1], basePositions[i * 3 + 2]);
+            const nx = nrm.getX(i), ny = nrm.getY(i), nz = nrm.getZ(i);
+            for (const j of vertsNear(probe, reach)) {
+              if (work[j]) continue;
+              /* only the opposite wall of a thin feature, never the skin
+                 alongside it */
+              if (nrm.getX(j) * nx + nrm.getY(j) * ny + nrm.getZ(j) * nz > -0.25) continue;
+              work[j] = work[i];
+              through++;
+            }
+          }
+        }
+
         /* write the differences back as auto stamps */
         const r = Math.max(0.004, meanEdge * 0.75);
         const autoStamps = [];
@@ -522,8 +587,8 @@
         save();
         replayStamps();
         say(
-          `repaired: filled ${filled} gap vertices, dropped ${removed.length} speck vertices ` +
-            `(${autoStamps.length} auto stamps). white = changed.`
+          `repaired: ${filled} gaps filled, ${through} hidden undersides picked up, ` +
+            `${removed.length} specks dropped (${autoStamps.length} auto stamps). white = changed.`
         );
       }
 
@@ -1009,6 +1074,31 @@
           say("imported " + stamps.length + " stamps");
         };
         input.click();
+      };
+
+      let cutting = false;
+      const cut = document.getElementById("cut");
+      const cutz = document.getElementById("cutz");
+      const applyCut = () => {
+        cutting = cut.checked;
+        clipPlane.constant = cutting ? +cutz.value : 10;
+        cutz.disabled = !cutting;
+      };
+      cut.onchange = applyCut;
+      cutz.oninput = () => {
+        document.getElementById("cutzv").textContent = (+cutz.value).toFixed(2);
+        applyCut();
+      };
+      applyCut();
+
+      /* inside the skull at eye level, looking back out through the sockets:
+         from here the lash undersides face the camera */
+      document.getElementById("inside").onclick = () => {
+        cut.checked = false;
+        applyCut();
+        controls.target.set(0, 0.42, 0.8);
+        camera.position.set(0, 0.41, 0.16);
+        say("inside the socket — the lash undersides face you now. paint as usual.");
       };
 
       document.getElementById("focus").onclick = () => {
