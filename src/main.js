@@ -1,7 +1,7 @@
 import * as THREE from "three";
 import { GLTFLoader } from "three/addons/loaders/GLTFLoader.js";
 import { MeshoptDecoder } from "three/addons/libs/meshopt_decoder.module.js";
-import { RGBELoader } from "three/addons/loaders/RGBELoader.js";
+import { HDRLoader } from "three/addons/loaders/HDRLoader.js";
 import { RoomEnvironment } from "three/addons/environments/RoomEnvironment.js";
 import { initChat } from "./chat.js";
 import { initEyeTuner } from "./eye-tuner.js";
@@ -55,7 +55,7 @@ renderer.toneMappingExposure = 1.15;
 /* Cavity shading comes from the baked (raytraced) per-vertex AO; the shadow
    map adds direct-light depth (brow onto eyes, nose onto lip) on top. */
 renderer.shadowMap.enabled = true;
-renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+renderer.shadowMap.type = THREE.PCFShadowMap;
 
 const scene = new THREE.Scene();
 const camera = new THREE.PerspectiveCamera(CAMERA_FOV, 1, 0.1, 100);
@@ -70,7 +70,7 @@ scene.environment = pmrem.fromScene(new RoomEnvironment(), 0.04).texture;
 pmrem.dispose();
 scene.environmentIntensity = 0.85;
 
-new RGBELoader().load(import.meta.env.BASE_URL + "studio_small_08_2k.hdr", (tex) => {
+new HDRLoader().load(import.meta.env.BASE_URL + "studio_small_08_2k.hdr", (tex) => {
   tex.mapping = THREE.EquirectangularReflectionMapping;
   scene.environment = tex;
   scene.environmentIntensity = 1.0;
@@ -571,10 +571,17 @@ const eyeLamps = [-1, 1].map((side) => {
   );
   lamp.visible = false; // until the mask says where the eyes are
   lamp.castShadow = EYES.lampShadows;
-  /* The shadow map is rendered only while the eyes are lit. Switching the
-     light off would do the same, but changing what lights exist changes the
-     shader three compiles for every material, and paying for that mid
-     sentence cost a dropped frame every time he started speaking. */
+  /* The lamps stay in the scene permanently and only their intensity moves:
+     removing a light changes what shader three compiles for every material,
+     and paying for that mid sentence cost a dropped frame every time he
+     started speaking.
+
+     Their shadow maps are drawn once, during loading, and then left alone.
+     Both lamps are children of the head, so they turn and drift with it —
+     what the beam can see never changes, and re-rendering the map would
+     redraw a million triangles per lamp per frame to reproduce the same
+     picture. It must be drawn at least once, though: a shadow-casting light
+     whose map was never rendered leaves the sampler bound to nothing. */
   lamp.shadow.autoUpdate = false;
   lamp.shadow.mapSize.set(512, 512);
   lamp.shadow.camera.near = 0.02;
@@ -584,6 +591,13 @@ const eyeLamps = [-1, 1].map((side) => {
   lamp.target.position.set(side * 0.5, 0.2, 2); // out, forward and a little wide
   return lamp;
 });
+
+/* Redraw the eye shadow maps on the next frame. Needed once at startup, and
+   again whenever something actually moves a lamp (the tuner). three clears
+   the flag itself once the map has been rendered. */
+function refreshEyeShadows() {
+  for (const lamp of eyeLamps) lamp.shadow.needsUpdate = true;
+}
 
 /* push the (possibly tuned) eye settings into the uniforms and lamps */
 function applyEyeSettings() {
@@ -599,6 +613,7 @@ function applyEyeSettings() {
       lamp.position.z = lamp.userData.restZ + EYES.lampStandoff;
     }
   }
+  refreshEyeShadows(); // beam width and position just changed
 }
 
 const head = new THREE.Group();
@@ -761,8 +776,13 @@ loader.load(
     }
     viewer.blinkMeshes = viewer.meshes.filter((m) => m.morphTargetInfluences?.length);
     /* Compile everything now, while the loading screen still covers it —
-       otherwise the first frame that needs a new program stalls. */
+       otherwise the first frame that needs a new program stalls. Then draw
+       one full frame, which is what actually allocates and fills the eye
+       lamps' shadow maps. Both happen behind the loading overlay, so the
+       cost lands where nobody is looking. */
     renderer.compile(scene, camera);
+    refreshEyeShadows();
+    renderer.render(scene, camera);
     initEyeTuner(EYES, applyEyeSettings);
 
     if (viewer.pendingVariant) selectVariant(viewer.pendingVariant);
@@ -856,10 +876,7 @@ function updateEyes(now, dt) {
 
   if (reduced) {
     eyeUniforms.uEyeGlow.value = lit;
-    for (const lamp of eyeLamps) {
-      lamp.intensity = EYES.lamp * lit;
-      lamp.shadow.needsUpdate = lit > 0;
-    }
+    for (const lamp of eyeLamps) lamp.intensity = EYES.lamp * lit;
     return;
   }
 
@@ -887,13 +904,9 @@ function updateEyes(now, dt) {
   /* the glow follows the lid, so a blink mid-sentence dims it too */
   const open = 1 - blinkState.amount * 0.92;
   eyeUniforms.uEyeGlow.value = lit * open * (0.94 + 0.06 * Math.sin(now * 1.7));
-  for (const lamp of eyeLamps) {
-    lamp.intensity = EYES.lamp * lit * open;
-    /* Intensity is a uniform, so riding it to zero costs nothing and keeps
-       the compiled shader identical. The shadow map is what actually costs,
-       and it is only redrawn while there is light to cast. */
-    lamp.shadow.needsUpdate = lit > 0;
-  }
+  /* Intensity is a uniform, so riding it to zero costs nothing and keeps the
+     compiled shader identical — nothing else here touches the GPU. */
+  for (const lamp of eyeLamps) lamp.intensity = EYES.lamp * lit * open;
 }
 
 /* ---------- render loop ---------- */
