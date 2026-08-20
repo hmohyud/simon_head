@@ -1,0 +1,483 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Simon — region painter</title>
+    <style>
+      * { margin: 0; padding: 0; box-sizing: border-box; }
+      html, body { height: 100%; overflow: hidden; background: #15171c; color: #d9dee7;
+        font: 400 12px/1.5 ui-monospace, SFMono-Regular, Menlo, monospace; }
+      canvas { display: block; }
+      #ui { position: fixed; top: 14px; left: 14px; width: 250px; z-index: 5;
+        background: rgba(12,14,18,0.92); border: 1px solid rgba(255,255,255,0.14);
+        border-radius: 12px; padding: 12px; backdrop-filter: blur(10px);
+        user-select: none; -webkit-user-select: none; max-height: calc(100vh - 28px); overflow-y: auto; }
+      h1 { font-size: 11px; letter-spacing: 0.18em; text-transform: uppercase; color: #8b93a1;
+        margin-bottom: 10px; font-weight: 400; }
+      .sec { border-top: 1px solid rgba(255,255,255,0.09); margin-top: 11px; padding-top: 10px; }
+      .lbl { display: flex; align-items: center; gap: 8px; padding: 5px 7px; border-radius: 7px;
+        cursor: pointer; border: 1px solid transparent; margin-bottom: 3px; }
+      .lbl:hover { background: rgba(255,255,255,0.06); }
+      .lbl.on { background: rgba(255,255,255,0.12); border-color: rgba(255,255,255,0.28); }
+      .dot { width: 11px; height: 11px; border-radius: 50%; flex: none; }
+      .lbl .n { margin-left: auto; color: #7c8595; font-size: 11px; }
+      .row { display: grid; grid-template-columns: 58px 1fr 42px; align-items: center; gap: 7px; margin: 7px 0; }
+      .row span { color: #8b93a1; }
+      .row b { font-weight: 400; text-align: right; color: #e6ebf3; }
+      input[type=range] { width: 100%; accent-color: #cfd8e6; }
+      .line { display: flex; align-items: center; justify-content: space-between; margin: 7px 0; }
+      button { background: rgba(255,255,255,0.08); border: 1px solid rgba(255,255,255,0.16);
+        border-radius: 7px; color: #d9dee7; font: inherit; padding: 6px 8px; cursor: pointer;
+        letter-spacing: 0.06em; }
+      button:hover { background: rgba(255,255,255,0.18); }
+      button.on { background: rgba(255,120,120,0.25); border-color: rgba(255,140,140,0.5); }
+      .btns { display: flex; gap: 6px; margin-top: 8px; }
+      .btns button { flex: 1; }
+      .hint { color: #6f7787; margin-top: 9px; line-height: 1.5; font-size: 11px; }
+      select { width: 100%; background: rgba(255,255,255,0.08); color: #d9dee7; font: inherit;
+        border: 1px solid rgba(255,255,255,0.16); border-radius: 7px; padding: 5px; }
+      #status { position: fixed; bottom: 14px; left: 14px; z-index: 5; color: #6f7787; }
+    </style>
+  </head>
+  <body>
+    <div id="ui">
+      <h1>region painter</h1>
+
+      <select id="model">
+        <option value="simon_mobile.glb">simon_mobile.glb (fast)</option>
+        <option value="simon.glb">simon.glb (full detail)</option>
+      </select>
+
+      <div class="sec" id="labels"></div>
+
+      <div class="sec">
+        <div class="row">
+          <span>brush</span><input id="brush" type="range" min="0.004" max="0.09" step="0.002" value="0.02" /><b id="brushv">0.020</b>
+        </div>
+        <div class="line"><span>mirror L/R</span><input id="mirror" type="checkbox" checked /></div>
+        <div class="line"><span>erase</span><button id="erase">off</button></div>
+      </div>
+
+      <div class="sec">
+        <div class="row">
+          <span>test blink</span><input id="blink" type="range" min="0" max="1" step="0.02" value="0" /><b id="blinkv">0.00</b>
+        </div>
+        <div class="hint">moves whatever you tagged as upper lid (and lashes) so you can see how a blink would read before committing.</div>
+      </div>
+
+      <div class="sec">
+        <div class="btns"><button id="focus">eyes</button><button id="front">front</button><button id="undo">undo</button></div>
+        <div class="btns"><button id="save">export</button><button id="load">import</button><button id="clear">clear</button></div>
+        <div class="hint" id="hint">
+          drag on the face to paint · right-drag orbits · wheel zooms · painting is saved in this browser automatically
+        </div>
+      </div>
+    </div>
+    <div id="status">loading…</div>
+
+    <script type="module">
+      import * as THREE from "three";
+      import { GLTFLoader } from "three/addons/loaders/GLTFLoader.js";
+      import { MeshoptDecoder } from "three/addons/libs/meshopt_decoder.module.js";
+      import { OrbitControls } from "three/addons/controls/OrbitControls.js";
+      import { computeBoundsTree, acceleratedRaycast } from "three-mesh-bvh";
+
+      /**
+       * Manual region painter for the bust. The scan has no rig, so any
+       * eyelid animation has to start from a hand-marked region; this paints
+       * those regions and exports them.
+       *
+       * Strokes are stored as STAMPS (a centre and radius in the model's
+       * normalised local space) rather than vertex indices, so a selection
+       * painted on the low-poly model replays exactly onto the full-detail
+       * one — the two meshes have different vertex counts but the same shape.
+       *
+       * Local tool: it is not part of the site and is not deployed.
+       */
+
+      THREE.BufferGeometry.prototype.computeBoundsTree = computeBoundsTree;
+      THREE.Mesh.prototype.raycast = acceleratedRaycast;
+
+      const HEAD_HEIGHT = 2.3; // matches src/main.js, so coordinates line up
+      const STORE = "simon-paint";
+
+      const LABELS = [
+        { key: "eye", name: "eye area", color: 0xff5fa8 },
+        { key: "upperLid", name: "upper lid", color: 0x4fd2ff },
+        { key: "lowerLid", name: "lower lid", color: 0x6bff8f },
+        { key: "lashes", name: "lashes", color: 0xffd24f },
+      ];
+
+      const statusEl = document.getElementById("status");
+      const say = (m) => (statusEl.textContent = m);
+
+      const renderer = new THREE.WebGLRenderer({ antialias: true });
+      renderer.setPixelRatio(Math.min(2, devicePixelRatio || 1));
+      renderer.setSize(innerWidth, innerHeight);
+      renderer.toneMapping = THREE.ACESFilmicToneMapping;
+      document.body.appendChild(renderer.domElement);
+
+      const scene = new THREE.Scene();
+      scene.background = new THREE.Color(0x15171c);
+      const camera = new THREE.PerspectiveCamera(38, innerWidth / innerHeight, 0.01, 100);
+      camera.position.set(0, 0.3, 3.4);
+
+      const controls = new OrbitControls(camera, renderer.domElement);
+      controls.enableDamping = true;
+      controls.target.set(0, 0.2, 0);
+      /* left button paints, so orbiting moves to the right button */
+      controls.mouseButtons = {
+        LEFT: null,
+        MIDDLE: THREE.MOUSE.DOLLY,
+        RIGHT: THREE.MOUSE.ROTATE,
+      };
+
+      scene.add(new THREE.HemisphereLight(0xffffff, 0x30343c, 1.5));
+      const key1 = new THREE.DirectionalLight(0xffffff, 1.6);
+      key1.position.set(1.5, 2, 3);
+      scene.add(key1);
+      const key2 = new THREE.DirectionalLight(0xaaccff, 0.8);
+      key2.position.set(-2, 1, -2);
+      scene.add(key2);
+
+      /* brush cursor */
+      const cursor = new THREE.Mesh(
+        new THREE.SphereGeometry(1, 20, 14),
+        new THREE.MeshBasicMaterial({ color: 0xffffff, transparent: true, opacity: 0.25, depthTest: false })
+      );
+      cursor.visible = false;
+      cursor.renderOrder = 2;
+      scene.add(cursor);
+
+      let mesh = null;
+      let basePositions = null; // untouched copy, for the blink preview
+      let labelOf = null; // Uint8Array: 0 = unpainted, else LABELS index + 1
+      let grid = null;
+      let cellSize = 0.05;
+      let stamps = [];
+      let activeLabel = 0;
+      let erasing = false;
+
+      /* ---------- ui ---------- */
+
+      const labelsBox = document.getElementById("labels");
+      const counters = [];
+      LABELS.forEach((l, i) => {
+        const row = document.createElement("div");
+        row.className = "lbl" + (i === 0 ? " on" : "");
+        row.innerHTML =
+          `<span class="dot" style="background:#${l.color.toString(16).padStart(6, "0")}"></span>` +
+          `<span>${l.name}</span><span class="n">0</span>`;
+        row.onclick = () => {
+          activeLabel = i;
+          [...labelsBox.children].forEach((c, j) => c.classList.toggle("on", j === i));
+        };
+        labelsBox.appendChild(row);
+        counters.push(row.querySelector(".n"));
+      });
+
+      const brush = document.getElementById("brush");
+      const brushv = document.getElementById("brushv");
+      brush.oninput = () => (brushv.textContent = (+brush.value).toFixed(3));
+      const mirror = document.getElementById("mirror");
+      const eraseBtn = document.getElementById("erase");
+      eraseBtn.onclick = () => {
+        erasing = !erasing;
+        eraseBtn.textContent = erasing ? "ON" : "off";
+        eraseBtn.classList.toggle("on", erasing);
+      };
+
+      /* ---------- model ---------- */
+
+      const loader = new GLTFLoader().setMeshoptDecoder(MeshoptDecoder);
+
+      function loadModel(file) {
+        say("loading " + file + "…");
+        if (mesh) {
+          scene.remove(mesh);
+          mesh.geometry.dispose();
+          mesh.material.dispose();
+          mesh = null;
+        }
+        loader.load(
+          file + "?v=" + Date.now(),
+          (gltf) => {
+            gltf.scene.updateMatrixWorld(true);
+            let geo = null;
+            gltf.scene.traverse((n) => {
+              if (n.isMesh && !geo) {
+                geo = n.geometry.clone();
+                /* quantised attributes must become float BEFORE any transform:
+                   scaling them in place overflows int16 and wraps the mesh */
+                const toFloat = (a) => {
+                  const out = new THREE.BufferAttribute(new Float32Array(a.count * 3), 3);
+                  for (let i = 0; i < a.count; i++) out.setXYZ(i, a.getX(i), a.getY(i), a.getZ(i));
+                  return out;
+                };
+                geo.setAttribute("position", toFloat(geo.getAttribute("position")));
+                if (geo.getAttribute("normal")) geo.setAttribute("normal", toFloat(geo.getAttribute("normal")));
+                geo.deleteAttribute("color");
+                geo.applyMatrix4(n.matrixWorld);
+              }
+            });
+
+            /* same normalisation the site applies, so coordinates match */
+            geo.computeBoundingBox();
+            const c = geo.boundingBox.getCenter(new THREE.Vector3());
+            const s = HEAD_HEIGHT / geo.boundingBox.getSize(new THREE.Vector3()).y;
+            geo.translate(-c.x, -c.y, -c.z);
+            geo.scale(s, s, s);
+            geo.computeVertexNormals();
+
+            const n = geo.getAttribute("position").count;
+            const colors = new Float32Array(n * 3).fill(0.82);
+            geo.setAttribute("color", new THREE.BufferAttribute(colors, 3));
+            geo.computeBoundsTree();
+
+            mesh = new THREE.Mesh(
+              geo,
+              new THREE.MeshStandardMaterial({ vertexColors: true, roughness: 0.75, metalness: 0 })
+            );
+            scene.add(mesh);
+            basePositions = geo.getAttribute("position").array.slice();
+            labelOf = new Uint8Array(n);
+            buildGrid();
+            replayStamps();
+            say(`${file} — ${n.toLocaleString()} verts. drag to paint.`);
+          },
+          undefined,
+          () => say("could not load " + file)
+        );
+      }
+
+      /* uniform grid over the vertices, so a brush dab only tests nearby
+         points instead of all of them */
+      function buildGrid() {
+        const pos = mesh.geometry.getAttribute("position");
+        cellSize = Math.max(0.03, +brush.max);
+        grid = new Map();
+        for (let i = 0; i < pos.count; i++) {
+          const k =
+            Math.floor(pos.getX(i) / cellSize) + "," +
+            Math.floor(pos.getY(i) / cellSize) + "," +
+            Math.floor(pos.getZ(i) / cellSize);
+          let cell = grid.get(k);
+          if (!cell) grid.set(k, (cell = []));
+          cell.push(i);
+        }
+      }
+
+      function vertsNear(p, r) {
+        const out = [];
+        const r2 = r * r;
+        const pos = mesh.geometry.getAttribute("position");
+        const lo = [p.x - r, p.y - r, p.z - r].map((v) => Math.floor(v / cellSize));
+        const hi = [p.x + r, p.y + r, p.z + r].map((v) => Math.floor(v / cellSize));
+        for (let x = lo[0]; x <= hi[0]; x++)
+          for (let y = lo[1]; y <= hi[1]; y++)
+            for (let z = lo[2]; z <= hi[2]; z++) {
+              const cell = grid.get(x + "," + y + "," + z);
+              if (!cell) continue;
+              for (const i of cell) {
+                const dx = pos.getX(i) - p.x, dy = pos.getY(i) - p.y, dz = pos.getZ(i) - p.z;
+                if (dx * dx + dy * dy + dz * dz <= r2) out.push(i);
+              }
+            }
+        return out;
+      }
+
+      const tmp = new THREE.Vector3();
+      function applyStamp(st, refresh = true) {
+        tmp.set(st.x, st.y, st.z);
+        const hits = vertsNear(tmp, st.r);
+        const value = st.l < 0 ? 0 : st.l + 1;
+        for (const i of hits) labelOf[i] = value;
+        if (refresh) paintColors(hits);
+      }
+
+      function paintColors(indices) {
+        const col = mesh.geometry.getAttribute("color");
+        for (const i of indices) {
+          const l = labelOf[i];
+          if (!l) col.setXYZ(i, 0.82, 0.82, 0.82);
+          else {
+            const c = new THREE.Color(LABELS[l - 1].color);
+            col.setXYZ(i, c.r, c.g, c.b);
+          }
+        }
+        col.needsUpdate = true;
+        updateCounts();
+      }
+
+      function updateCounts() {
+        const tally = new Array(LABELS.length).fill(0);
+        for (let i = 0; i < labelOf.length; i++) if (labelOf[i]) tally[labelOf[i] - 1]++;
+        counters.forEach((el, i) => (el.textContent = tally[i]));
+      }
+
+      function replayStamps() {
+        labelOf.fill(0);
+        for (const st of stamps) applyStamp(st, false);
+        paintColors([...labelOf.keys()]);
+      }
+
+      /* ---------- painting ---------- */
+
+      const ray = new THREE.Raycaster();
+      ray.firstHitOnly = true;
+      const ndc = new THREE.Vector2();
+      let painting = false;
+
+      function pick(e) {
+        if (!mesh) return null;
+        ndc.set((e.clientX / innerWidth) * 2 - 1, -(e.clientY / innerHeight) * 2 + 1);
+        ray.setFromCamera(ndc, camera);
+        return ray.intersectObject(mesh, false)[0] ?? null;
+      }
+
+      function dab(hit) {
+        const r = +brush.value;
+        const l = erasing ? -1 : activeLabel;
+        const list = [{ l, x: hit.point.x, y: hit.point.y, z: hit.point.z, r }];
+        if (mirror.checked) list.push({ l, x: -hit.point.x, y: hit.point.y, z: hit.point.z, r });
+        for (const st of list) {
+          stamps.push(st);
+          applyStamp(st);
+        }
+        save();
+      }
+
+      renderer.domElement.addEventListener("pointerdown", (e) => {
+        if (e.button !== 0) return;
+        const hit = pick(e);
+        if (!hit) return;
+        painting = true;
+        renderer.domElement.setPointerCapture(e.pointerId);
+        dab(hit);
+      });
+      renderer.domElement.addEventListener("pointermove", (e) => {
+        const hit = pick(e);
+        cursor.visible = !!hit;
+        if (hit) {
+          cursor.position.copy(hit.point);
+          cursor.scale.setScalar(+brush.value);
+          cursor.material.color.set(erasing ? 0xff6666 : LABELS[activeLabel].color);
+          if (painting) dab(hit);
+        }
+      });
+      const stop = () => (painting = false);
+      renderer.domElement.addEventListener("pointerup", stop);
+      renderer.domElement.addEventListener("pointerleave", () => {
+        stop();
+        cursor.visible = false;
+      });
+      renderer.domElement.addEventListener("contextmenu", (e) => e.preventDefault());
+
+      /* ---------- blink preview ---------- */
+
+      const blink = document.getElementById("blink");
+      const blinkv = document.getElementById("blinkv");
+      blink.oninput = () => {
+        blinkv.textContent = (+blink.value).toFixed(2);
+        if (!mesh) return;
+        const amount = +blink.value;
+        const pos = mesh.geometry.getAttribute("position");
+        /* upper lid (and lashes) slide down and slightly inward; the travel
+           is scaled by the eye opening so it closes rather than shears */
+        for (let i = 0; i < pos.count; i++) {
+          const l = labelOf[i];
+          const isLid = l === 2 || l === 4; // upper lid, lashes
+          const bx = basePositions[i * 3], by = basePositions[i * 3 + 1], bz = basePositions[i * 3 + 2];
+          if (!isLid) {
+            pos.setXYZ(i, bx, by, bz);
+            continue;
+          }
+          pos.setXYZ(i, bx, by - 0.055 * amount, bz - 0.012 * amount);
+        }
+        pos.needsUpdate = true;
+        mesh.geometry.computeVertexNormals();
+      };
+
+      /* ---------- persistence ---------- */
+
+      function save() {
+        try {
+          localStorage.setItem(STORE, JSON.stringify(stamps));
+        } catch {
+          /* over quota — the session still works, it just will not persist */
+        }
+      }
+      try {
+        stamps = JSON.parse(localStorage.getItem(STORE) || "[]");
+      } catch {
+        stamps = [];
+      }
+
+      document.getElementById("undo").onclick = () => {
+        /* a mirrored dab pushes two stamps; drop both */
+        stamps.splice(mirror.checked ? -2 : -1);
+        save();
+        replayStamps();
+      };
+      document.getElementById("clear").onclick = () => {
+        if (!confirm("clear all painted regions?")) return;
+        stamps = [];
+        save();
+        replayStamps();
+      };
+      document.getElementById("save").onclick = () => {
+        const tally = {};
+        LABELS.forEach((l, i) => (tally[l.key] = labelOf ? [...labelOf].filter((v) => v === i + 1).length : 0));
+        const payload = {
+          space: "model-local, head normalised to " + HEAD_HEIGHT + " units tall",
+          labels: LABELS.map((l) => l.key),
+          verticesPainted: tally,
+          stamps,
+        };
+        const text = JSON.stringify(payload, null, 1);
+        navigator.clipboard?.writeText(text).catch(() => {});
+        const a = document.createElement("a");
+        a.href = URL.createObjectURL(new Blob([text], { type: "application/json" }));
+        a.download = "simon-regions.json";
+        a.click();
+        say("exported " + stamps.length + " stamps (also copied to clipboard)");
+      };
+      document.getElementById("load").onclick = () => {
+        const input = document.createElement("input");
+        input.type = "file";
+        input.accept = "application/json";
+        input.onchange = async () => {
+          const data = JSON.parse(await input.files[0].text());
+          stamps = data.stamps ?? data;
+          save();
+          replayStamps();
+          say("imported " + stamps.length + " stamps");
+        };
+        input.click();
+      };
+
+      document.getElementById("focus").onclick = () => {
+        controls.target.set(0, 0.41, 0.35);
+        camera.position.set(0, 0.45, 1.55);
+      };
+      document.getElementById("front").onclick = () => {
+        controls.target.set(0, 0.2, 0);
+        camera.position.set(0, 0.3, 3.4);
+      };
+      document.getElementById("model").onchange = (e) => loadModel(e.target.value);
+
+      addEventListener("resize", () => {
+        camera.aspect = innerWidth / innerHeight;
+        camera.updateProjectionMatrix();
+        renderer.setSize(innerWidth, innerHeight);
+      });
+
+      loadModel(document.getElementById("model").value);
+      renderer.setAnimationLoop(() => {
+        controls.update();
+        renderer.render(scene, camera);
+      });
+    </script>
+  </body>
+</html>
