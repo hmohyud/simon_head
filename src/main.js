@@ -571,6 +571,11 @@ const eyeLamps = [-1, 1].map((side) => {
   );
   lamp.visible = false; // until the mask says where the eyes are
   lamp.castShadow = EYES.lampShadows;
+  /* The shadow map is rendered only while the eyes are lit. Switching the
+     light off would do the same, but changing what lights exist changes the
+     shader three compiles for every material, and paying for that mid
+     sentence cost a dropped frame every time he started speaking. */
+  lamp.shadow.autoUpdate = false;
   lamp.shadow.mapSize.set(512, 512);
   lamp.shadow.camera.near = 0.02;
   lamp.shadow.camera.far = 2;
@@ -755,6 +760,9 @@ loader.load(
       });
     }
     viewer.blinkMeshes = viewer.meshes.filter((m) => m.morphTargetInfluences?.length);
+    /* Compile everything now, while the loading screen still covers it —
+       otherwise the first frame that needs a new program stalls. */
+    renderer.compile(scene, camera);
     initEyeTuner(EYES, applyEyeSettings);
 
     if (viewer.pendingVariant) selectVariant(viewer.pendingVariant);
@@ -850,7 +858,7 @@ function updateEyes(now, dt) {
     eyeUniforms.uEyeGlow.value = lit;
     for (const lamp of eyeLamps) {
       lamp.intensity = EYES.lamp * lit;
-      lamp.visible = lit > 0;
+      lamp.shadow.needsUpdate = lit > 0;
     }
     return;
   }
@@ -881,10 +889,10 @@ function updateEyes(now, dt) {
   eyeUniforms.uEyeGlow.value = lit * open * (0.94 + 0.06 * Math.sin(now * 1.7));
   for (const lamp of eyeLamps) {
     lamp.intensity = EYES.lamp * lit * open;
-    /* Dark lamps are switched off outright rather than dimmed to zero: an
-       invisible light still costs a shadow map every frame, and this is the
-       whole ~0.8ms of it. */
-    lamp.visible = lit > 0;
+    /* Intensity is a uniform, so riding it to zero costs nothing and keeps
+       the compiled shader identical. The shadow map is what actually costs,
+       and it is only redrawn while there is light to cast. */
+    lamp.shadow.needsUpdate = lit > 0;
   }
 }
 
