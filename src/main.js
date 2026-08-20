@@ -4,6 +4,7 @@ import { MeshoptDecoder } from "three/addons/libs/meshopt_decoder.module.js";
 import { RGBELoader } from "three/addons/loaders/RGBELoader.js";
 import { RoomEnvironment } from "three/addons/environments/RoomEnvironment.js";
 import { initChat } from "./chat.js";
+import { initEyeTuner } from "./eye-tuner.js";
 
 /**
  * A floating marble head, alone in a dark gallery.
@@ -332,6 +333,7 @@ function makeTexturedMaterial(slug, cfg, hasAO, onReady) {
     shader.uniforms.uTexNormal = { value: normalMap };
     shader.uniforms.uTexScale = { value: cfg.scale };
     shader.uniforms.uRelief = { value: cfg.relief };
+    Object.assign(shader.uniforms, eyeUniforms);
     shader.vertexShader = shader.vertexShader
       .replace(
         "#include <common>",
@@ -349,7 +351,10 @@ function makeTexturedMaterial(slug, cfg, hasAO, onReady) {
     shader.fragmentShader = shader.fragmentShader
       .replace(
         "#include <common>",
-        "#include <common>\n" + (hasAO ? "varying float vAO;\n" : "") + TRIPLANAR_GLSL
+        "#include <common>\n" +
+          (hasAO ? "varying float vAO;\n" : "") +
+          TRIPLANAR_GLSL +
+          eyeDecl("vTriPos")
       )
       .replace(
         "#include <color_fragment>",
@@ -384,7 +389,8 @@ function makeTexturedMaterial(slug, cfg, hasAO, onReady) {
   objN = normalize(mix(gn, objN, uRelief));
   normal = normalize(normalMatrix * objN);
 }`
-      );
+      )
+      .replace("#include <emissivemap_fragment>", EYE_EMISSIVE_CHUNK);
     if (hasAO) {
       shader.fragmentShader = shader.fragmentShader.replace(
         "#include <aomap_fragment>",
@@ -466,6 +472,7 @@ function makeMarbleMaterial(hasAO) {
     shader.uniforms.uMarbleVein = { value: new THREE.Color(...start.vein) };
     shader.uniforms.uVeinGain = { value: start.gain };
     marbleState.uniforms = shader.uniforms;
+    Object.assign(shader.uniforms, eyeUniforms);
     shader.vertexShader = shader.vertexShader
       .replace(
         "#include <common>",
@@ -479,7 +486,10 @@ function makeMarbleMaterial(hasAO) {
     shader.fragmentShader = shader.fragmentShader
       .replace(
         "#include <common>",
-        "#include <common>\n" + (hasAO ? "varying float vAO;\n" : "") + MARBLE_GLSL
+        "#include <common>\n" +
+          (hasAO ? "varying float vAO;\n" : "") +
+          MARBLE_GLSL +
+          eyeDecl("vMarblePos")
       )
       .replace(
         "void main() {",
@@ -487,6 +497,7 @@ function makeMarbleMaterial(hasAO) {
       )
       .replace("#include <color_fragment>", MARBLE_COLOR_CHUNK)
       .replace("float roughnessFactor = roughness;", MARBLE_ROUGHNESS_CHUNK)
+      .replace("#include <emissivemap_fragment>", EYE_EMISSIVE_CHUNK)
       .replace("#include <opaque_fragment>", MARBLE_RIM_CHUNK);
     if (hasAO) {
       shader.fragmentShader = shader.fragmentShader.replace(
@@ -500,8 +511,145 @@ function makeMarbleMaterial(hasAO) {
 
 /* ---------- head ---------- */
 
+/* ---------- eye glow ---------- */
+
+/* Socket centres in the model's local space, located with
+   tools/find-eyes.mjs: the face surface sits at z~0.57 there, so the anchor
+   sits just inside it and the glow fills the socket instead of floating in
+   front of the face. Tunable live with ?tune=1. */
+const EYES = {
+  x: 0.17,
+  y: 0.405,
+  z: 0.545,
+  radius: 0.095,
+  intensity: 2.4,
+  void: 0.85,
+  halo: 0.3,
+  haloSize: 0.32,
+  color: "#ffd9a0",
+  blink: true,
+};
+try {
+  Object.assign(EYES, JSON.parse(localStorage.getItem("simon-eyes") || "{}"));
+} catch {
+  /* unreadable settings: fall back to the defaults above */
+}
+
+const eyeUniforms = {
+  uEyeL: { value: new THREE.Vector3(-EYES.x, EYES.y, EYES.z) },
+  uEyeR: { value: new THREE.Vector3(EYES.x, EYES.y, EYES.z) },
+  uEyeColor: { value: new THREE.Color(EYES.color) },
+  uEyeRadius: { value: EYES.radius },
+  uEyeIntensity: { value: EYES.intensity },
+  uEyeVoid: { value: EYES.void },
+  uEyeGlow: { value: 1 },
+};
+
+const EYE_GLSL = /* glsl */ `
+uniform vec3 uEyeL;
+uniform vec3 uEyeR;
+uniform vec3 uEyeColor;
+uniform float uEyeRadius;
+uniform float uEyeIntensity;
+uniform float uEyeVoid;
+uniform float uEyeGlow;
+float eyeField(vec3 q, float r) {
+  return smoothstep(r, 0.0, min(distance(q, uEyeL), distance(q, uEyeR)));
+}
+`;
+
+/* the two materials keep their object-space position in differently named
+   varyings, so the shared chunk reads it through a #define */
+const eyeDecl = (posVarying) => "\n#define EYE_POS " + posVarying + "\n" + EYE_GLSL;
+
+/* hot core plus a wide, dim spill so the surrounding stone reads as lit */
+const EYE_EMISSIVE_CHUNK = /* glsl */ `#include <emissivemap_fragment>
+{
+  /* hollow the socket first: white marble is already near-white where the
+     eyes are, so an additive glow alone would read as nothing. Sinking the
+     socket to near-black gives the light something to emerge from. */
+  float socket = pow(eyeField(EYE_POS, uEyeRadius * 1.4), 1.2);
+  diffuseColor.rgb *= mix(1.0, 0.1, socket * uEyeVoid);
+
+  float core = pow(eyeField(EYE_POS, uEyeRadius), 1.5);
+  float spill = pow(eyeField(EYE_POS, uEyeRadius * 3.5), 3.0) * 0.22;
+  totalEmissiveRadiance += uEyeColor * (core + spill) * uEyeIntensity * uEyeGlow;
+}`;
+
 const head = new THREE.Group();
 scene.add(head);
+
+/* Additive halos in front of each socket: the light bleeding into the air
+   that a purely surface-emissive shader cannot show. Two sprites, so the
+   cost is nil; depth testing hides them when the head turns away. */
+function makeGlowTexture() {
+  const c = document.createElement("canvas");
+  c.width = c.height = 128;
+  const g = c.getContext("2d");
+  const grad = g.createRadialGradient(64, 64, 0, 64, 64, 64);
+  grad.addColorStop(0, "rgba(255,255,255,1)");
+  grad.addColorStop(0.22, "rgba(255,255,255,0.5)");
+  grad.addColorStop(1, "rgba(255,255,255,0)");
+  g.fillStyle = grad;
+  g.fillRect(0, 0, 128, 128);
+  const tex = new THREE.CanvasTexture(c);
+  tex.colorSpace = THREE.SRGBColorSpace;
+  return tex;
+}
+const glowTexture = makeGlowTexture();
+const eyeSprites = [-1, 1].map((side) => {
+  const sprite = new THREE.Sprite(
+    new THREE.SpriteMaterial({
+      map: glowTexture,
+      color: new THREE.Color(EYES.color),
+      transparent: true,
+      blending: THREE.AdditiveBlending,
+      depthWrite: false,
+      opacity: EYES.halo,
+    })
+  );
+  sprite.position.set(side * EYES.x, EYES.y, EYES.z + 0.06);
+  sprite.scale.setScalar(EYES.haloSize);
+  head.add(sprite);
+  return sprite;
+});
+
+/* push the (possibly tuned) settings into the uniforms and sprites */
+function applyEyeSettings() {
+  eyeUniforms.uEyeL.value.set(-EYES.x, EYES.y, EYES.z);
+  eyeUniforms.uEyeR.value.set(EYES.x, EYES.y, EYES.z);
+  eyeUniforms.uEyeRadius.value = EYES.radius;
+  eyeUniforms.uEyeIntensity.value = EYES.intensity;
+  eyeUniforms.uEyeVoid.value = EYES.void;
+  eyeUniforms.uEyeColor.value.set(EYES.color);
+  eyeSprites.forEach((sprite, i) => {
+    sprite.position.set((i ? 1 : -1) * EYES.x, EYES.y, EYES.z + 0.06);
+    sprite.material.color.set(EYES.color);
+  });
+}
+applyEyeSettings();
+
+/* The stone has no eyelids to close, so the GLOW blinks instead: a brief
+   flicker-out on a human-ish rhythm reads unmistakably as a blink, without
+   the risk of deforming a scanned face. */
+const eyeAnim = { nextBlink: 3, blinkAt: -10 };
+function updateEyes(w, excite) {
+  let glow = 1;
+  if (!reduced) {
+    if (EYES.blink && w > eyeAnim.nextBlink) {
+      eyeAnim.blinkAt = w;
+      eyeAnim.nextBlink = w + 2.6 + Math.random() * 4.4;
+    }
+    const bt = (w - eyeAnim.blinkAt) / 0.15;
+    const blink = bt >= 0 && bt <= 1 ? 1 - Math.sin(Math.PI * bt) * 0.9 : 1;
+    glow = blink * (0.9 + 0.1 * Math.sin(w * 1.7)) * (1 + excite * 0.8);
+  }
+  eyeUniforms.uEyeGlow.value = glow;
+  for (const sprite of eyeSprites) {
+    sprite.material.opacity = EYES.halo * glow;
+    sprite.scale.setScalar(EYES.haloSize * (0.94 + 0.06 * glow));
+  }
+}
 
 const state = {
   targetX: 0,
@@ -757,6 +905,8 @@ renderer.setAnimationLoop((t) => {
   const sc = 0.86 + 0.14 * inE;
   head.scale.setScalar(sc);
 
+  updateEyes(t / 1000, s.excite);
+
   /* ease the marble palette toward the selected stone */
   if (marbleState.uniforms) {
     const mk = 1 - Math.exp(-5 * dt);
@@ -778,4 +928,14 @@ renderer.setAnimationLoop((t) => {
   }
 
   renderer.render(scene, camera);
+});
+
+/* Tuning overlay (?tune=1). Last, so every object it needs exists. */
+initEyeTuner(EYES, applyEyeSettings, {
+  THREE,
+  camera,
+  canvas,
+  headGroup: head,
+  viewer,
+  state,
 });
