@@ -1,4 +1,5 @@
 import { defineConfig, loadEnv } from "vite";
+import { mkdirSync, writeFileSync } from "node:fs";
 import { cannedBusyReply, cannedLimitReply, cleanReply, groqPayload } from "./worker/persona.js";
 
 /* Dev-only stand-in for the Cloudflare Worker: proxies /api/chat to Groq
@@ -8,6 +9,47 @@ function chatDevProxy(apiKey) {
   return {
     name: "chat-dev-proxy",
     configureServer(server) {
+      /* Dev-only: lets the region painter save straight into the repo, so
+         the baking tool and the painter never drift apart. */
+      server.middlewares.use("/api/regions", (req, res) => {
+        if (req.method !== "POST") { res.statusCode = 405; res.end(); return; }
+        let raw = "";
+        req.on("data", (c) => (raw += c));
+        req.on("end", () => {
+          try {
+            mkdirSync("regions", { recursive: true });
+            writeFileSync("regions/simon-regions.json", raw);
+            res.setHeader("content-type", "application/json");
+            res.end(JSON.stringify({ ok: true, bytes: raw.length }));
+          } catch (e) {
+            res.statusCode = 500;
+            res.end(JSON.stringify({ error: String(e.message || e) }));
+          }
+        });
+      });
+
+      /* Dev-only: the painter posts the finished deformation here, so what
+         gets baked into the model is exactly what was approved on screen
+         rather than a second implementation that has to be kept in step. */
+      server.middlewares.use("/api/bake", (req, res) => {
+        if (req.method !== "POST") { res.statusCode = 405; res.end(); return; }
+        let raw = "";
+        req.on("data", (c) => (raw += c));
+        req.on("end", () => {
+          try {
+            const data = JSON.parse(raw);
+            const name = String(data.model || "unknown").replace(/[^a-z0-9_.-]/gi, "");
+            mkdirSync("regions", { recursive: true });
+            writeFileSync("regions/bake-" + name + ".json", raw);
+            res.setHeader("content-type", "application/json");
+            res.end(JSON.stringify({ ok: true, file: "regions/bake-" + name + ".json", bytes: raw.length }));
+          } catch (e) {
+            res.statusCode = 500;
+            res.end(JSON.stringify({ error: String(e.message || e) }));
+          }
+        });
+      });
+
       server.middlewares.use("/api/chat", (req, res) => {
         if (req.method !== "POST") {
           res.statusCode = 405;

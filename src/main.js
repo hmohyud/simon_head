@@ -4,6 +4,7 @@ import { MeshoptDecoder } from "three/addons/libs/meshopt_decoder.module.js";
 import { RGBELoader } from "three/addons/loaders/RGBELoader.js";
 import { RoomEnvironment } from "three/addons/environments/RoomEnvironment.js";
 import { initChat } from "./chat.js";
+import { initEyeTuner } from "./eye-tuner.js";
 
 /**
  * A floating marble head, alone in a dark gallery.
@@ -273,6 +274,8 @@ function setMarble(name) {
 
 const viewer = {
   meshes: [],
+  blinkMeshes: [],
+  hasEyeMask: false,
   hasAO: false,
   marbleMaterial: null,
   textured: {}, // slug -> { material, ready, wanted }
@@ -332,10 +335,11 @@ function makeTexturedMaterial(slug, cfg, hasAO, onReady) {
     shader.uniforms.uTexNormal = { value: normalMap };
     shader.uniforms.uTexScale = { value: cfg.scale };
     shader.uniforms.uRelief = { value: cfg.relief };
+    Object.assign(shader.uniforms, eyeUniforms);
     shader.vertexShader = shader.vertexShader
       .replace(
         "#include <common>",
-        "#include <common>\nvarying vec3 vTriPos;\nvarying vec3 vObjNormal;" +
+        "#include <common>\nvarying vec3 vTriPos;\nvarying vec3 vObjNormal;\nvarying float vEyeMask;" +
           (hasAO ? "\nvarying float vAO;\nattribute vec3 color;" : "")
       )
       .replace(
@@ -344,12 +348,13 @@ function makeTexturedMaterial(slug, cfg, hasAO, onReady) {
       )
       .replace(
         "#include <begin_vertex>",
-        "#include <begin_vertex>\nvTriPos = transformed;" + (hasAO ? "\nvAO = color.r;" : "")
+        "#include <begin_vertex>\nvTriPos = transformed;" +
+          (hasAO ? "\nvAO = color.r;\nvEyeMask = color.g;" : "\nvEyeMask = 0.0;")
       );
     shader.fragmentShader = shader.fragmentShader
       .replace(
         "#include <common>",
-        "#include <common>\n" + (hasAO ? "varying float vAO;\n" : "") + TRIPLANAR_GLSL
+        "#include <common>\n" + (hasAO ? "varying float vAO;\n" : "") + EYE_VARYINGS + TRIPLANAR_GLSL
       )
       .replace(
         "#include <color_fragment>",
@@ -365,6 +370,7 @@ function makeTexturedMaterial(slug, cfg, hasAO, onReady) {
         "float roughnessFactor = roughness;",
         /* glsl */ `float roughnessFactor = clamp(triSample(uTexRough, triWeights()).r * roughness, 0.04, 1.0);`
       )
+      .replace("#include <emissivemap_fragment>", EYE_FRAGMENT_CHUNK)
       .replace(
         "#include <normal_fragment_maps>",
         /* glsl */ `{
@@ -466,20 +472,22 @@ function makeMarbleMaterial(hasAO) {
     shader.uniforms.uMarbleVein = { value: new THREE.Color(...start.vein) };
     shader.uniforms.uVeinGain = { value: start.gain };
     marbleState.uniforms = shader.uniforms;
+    Object.assign(shader.uniforms, eyeUniforms);
     shader.vertexShader = shader.vertexShader
       .replace(
         "#include <common>",
-        "#include <common>\nvarying vec3 vMarblePos;" +
+        "#include <common>\nvarying vec3 vMarblePos;\nvarying float vEyeMask;" +
           (hasAO ? "\nvarying float vAO;\nattribute vec3 color;" : "")
       )
       .replace(
         "#include <begin_vertex>",
-        "#include <begin_vertex>\nvMarblePos = transformed;" + (hasAO ? "\nvAO = color.r;" : "")
+        "#include <begin_vertex>\nvMarblePos = transformed;" +
+          (hasAO ? "\nvAO = color.r;\nvEyeMask = color.g;" : "\nvEyeMask = 0.0;")
       );
     shader.fragmentShader = shader.fragmentShader
       .replace(
         "#include <common>",
-        "#include <common>\n" + (hasAO ? "varying float vAO;\n" : "") + MARBLE_GLSL
+        "#include <common>\n" + (hasAO ? "varying float vAO;\n" : "") + EYE_VARYINGS + MARBLE_GLSL
       )
       .replace(
         "void main() {",
@@ -487,6 +495,7 @@ function makeMarbleMaterial(hasAO) {
       )
       .replace("#include <color_fragment>", MARBLE_COLOR_CHUNK)
       .replace("float roughnessFactor = roughness;", MARBLE_ROUGHNESS_CHUNK)
+      .replace("#include <emissivemap_fragment>", EYE_FRAGMENT_CHUNK)
       .replace("#include <opaque_fragment>", MARBLE_RIM_CHUNK);
     if (hasAO) {
       shader.fragmentShader = shader.fragmentShader.replace(
@@ -499,6 +508,86 @@ function makeMarbleMaterial(hasAO) {
 }
 
 /* ---------- head ---------- */
+
+/* ---------- eyes: light and blink ---------- */
+
+/* The eye area is painted in paint.html and baked into COLOR_0's green
+   channel (red still carries the ambient occlusion), so the light fills
+   exactly the shape that was painted, feathered at its edge. */
+const EYES = {
+  colour: "#ffd9a0",
+  intensity: 2.2, // how brightly the eye itself burns
+  lamp: 0.5, // how much light it throws onto the face
+  lampRange: 0.8,
+  lampStandoff: 0.06, // sit the lamp clear of the surface, facing out
+  lampAngle: 0.85, // beam width: light leaving an eye is a beam, not a bulb
+  lampShadows: !IS_MOBILE, // so the beam is blocked by the nose rather than passing through it
+  socket: 0.85, // darkening behind the light, so it reads as a source
+};
+
+const eyeUniforms = {
+  uEyeColour: { value: new THREE.Color(EYES.colour) },
+  uEyeIntensity: { value: EYES.intensity },
+  uEyeSocket: { value: EYES.socket },
+  uEyeGlow: { value: 1 },
+};
+
+/* Hollow the socket first, then burn the light out of it: white marble is
+   already near-white at the eyes, so an additive glow alone reads as
+   nothing. */
+const EYE_FRAGMENT_CHUNK = /* glsl */ `#include <emissivemap_fragment>
+{
+  float mask = clamp(vEyeMask, 0.0, 1.0);
+  diffuseColor.rgb *= mix(1.0, 0.08, mask * uEyeSocket);
+  totalEmissiveRadiance += uEyeColour * pow(mask, 1.4) * uEyeIntensity * uEyeGlow;
+}`;
+
+const EYE_VARYINGS = /* glsl */ `
+varying float vEyeMask;
+uniform vec3 uEyeColour;
+uniform float uEyeIntensity;
+uniform float uEyeSocket;
+uniform float uEyeGlow;
+`;
+
+/* Lamps inside the sockets. Without them the eyes glow but throw nothing
+   onto the nose and brow, which is the difference between a light source
+   and a bright patch of paint. */
+/* Spot lights, not point lights. A point light radiates in every direction,
+   so it lit the inside of the nose and the bridge between the eyes as
+   readily as the face — it read as a bulb buried in the skull. A spot aimed
+   outward is both closer to what light leaving an eye does and cheap enough
+   to cast a real shadow, which is what stops it shining through the nose. */
+const eyeLamps = [-1, 1].map((side) => {
+  const lamp = new THREE.SpotLight(
+    new THREE.Color(EYES.colour), 0, EYES.lampRange, EYES.lampAngle, 0.7, 2
+  );
+  lamp.visible = false; // until the mask says where the eyes are
+  lamp.castShadow = EYES.lampShadows;
+  lamp.shadow.mapSize.set(512, 512);
+  lamp.shadow.camera.near = 0.02;
+  lamp.shadow.camera.far = 2;
+  lamp.shadow.bias = -0.0015;
+  lamp.shadow.normalBias = 0.02;
+  lamp.target.position.set(side * 0.5, 0.2, 2); // out, forward and a little wide
+  return lamp;
+});
+
+/* push the (possibly tuned) eye settings into the uniforms and lamps */
+function applyEyeSettings() {
+  eyeUniforms.uEyeColour.value.set(EYES.colour);
+  eyeUniforms.uEyeIntensity.value = EYES.intensity;
+  eyeUniforms.uEyeSocket.value = EYES.socket;
+  for (const lamp of eyeLamps) {
+    lamp.color.set(EYES.colour);
+    lamp.distance = EYES.lampRange;
+    lamp.angle = EYES.lampAngle;
+    lamp.castShadow = EYES.lampShadows;
+    if (lamp.userData.restZ !== undefined) {
+      lamp.position.z = lamp.userData.restZ + EYES.lampStandoff;
+    }
+  }
+}
 
 const head = new THREE.Group();
 scene.add(head);
@@ -557,6 +646,18 @@ loader.load(
         if (geometry.getAttribute("normal")) {
           geometry.setAttribute("normal", toFloat(geometry.getAttribute("normal")));
         }
+        /* Morph deltas are quantised too, and applyMatrix4 leaves them
+           alone — convert them by hand, or the blink arrives at the wrong
+           size and wraps, exactly as the positions once did. */
+        for (const key of ["position", "normal"]) {
+          const targets = geometry.morphAttributes[key];
+          if (!targets) continue;
+          geometry.morphAttributes[key] = targets.map((attr) => {
+            const out = new THREE.BufferAttribute(new Float32Array(attr.count * 3), 3);
+            for (let i = 0; i < attr.count; i++) out.setXYZ(i, attr.getX(i), attr.getY(i), attr.getZ(i));
+            return out;
+          });
+        }
         geometry.applyMatrix4(node.matrixWorld);
         geometries.push(geometry);
       }
@@ -584,6 +685,12 @@ loader.load(
     for (const geometry of geometries) {
       geometry.translate(-center.x, -center.y, -center.z);
       geometry.scale(scale, scale, scale);
+      /* the positions were just scaled, so the blink offsets must be too;
+         normal deltas are directions and are left as they are */
+      for (const attr of geometry.morphAttributes.position ?? []) {
+        const arr = attr.array;
+        for (let i = 0; i < arr.length; i++) arr[i] *= scale;
+      }
       if (!geometry.getAttribute("normal")) geometry.computeVertexNormals();
       const mesh = new THREE.Mesh(geometry, origMaterial ?? material);
       mesh.castShadow = true;
@@ -595,6 +702,46 @@ loader.load(
     state.loaded = true;
     loadingEl.classList.add("done");
     document.body.classList.add("ready");
+    /* A lamp in each socket, at the centroid of the painted eye mask,
+       nudged forward so its light spills onto the face rather than being
+       trapped inside the head. */
+    const maskAttr = geometries[0]?.getAttribute("color");
+    if (maskAttr) {
+      const posAttr = geometries[0].getAttribute("position");
+      const sums = [
+        { x: 0, y: 0, z: 0, w: 0 },
+        { x: 0, y: 0, z: 0, w: 0 },
+      ];
+      for (let i = 0; i < maskAttr.count; i++) {
+        const m = maskAttr.getY(i); // green channel = eye mask
+        if (m < 0.5) continue;
+        const side = posAttr.getX(i) < 0 ? 0 : 1;
+        sums[side].x += posAttr.getX(i) * m;
+        sums[side].y += posAttr.getY(i) * m;
+        sums[side].z += posAttr.getZ(i) * m;
+        sums[side].w += m;
+      }
+      sums.forEach((sum, i) => {
+        if (sum.w <= 0) return;
+        /* Out in front of the eye, not level with it: a lamp sunk into the
+           surface throws half its light into the closed shell of the head and
+           lights the nose bridge from behind, which reads as a source buried
+           in the skull rather than light leaving the eyes. */
+        eyeLamps[i].userData.restZ = sum.z / sum.w;
+        eyeLamps[i].position.set(
+          sum.x / sum.w,
+          sum.y / sum.w,
+          sum.z / sum.w + EYES.lampStandoff
+        );
+        eyeLamps[i].visible = true;
+        head.add(eyeLamps[i]);
+        head.add(eyeLamps[i].target); // a spot aims at its target object
+        viewer.hasEyeMask = true;
+      });
+    }
+    viewer.blinkMeshes = viewer.meshes.filter((m) => m.morphTargetInfluences?.length);
+    initEyeTuner(EYES, applyEyeSettings);
+
     if (viewer.pendingVariant) selectVariant(viewer.pendingVariant);
     if (import.meta.env.DEV)
       window.__d = { renderer, scene, camera, head, state, material, THREE, fit: { center, scale } };
@@ -668,6 +815,48 @@ function layout() {
 }
 window.addEventListener("resize", layout);
 layout();
+
+/* ---------- eyes: blink rhythm and light ---------- */
+
+/* A blink is quick — around a tenth of a second to close, a little longer
+   to open — and comes every few seconds, occasionally twice in a row. The
+   light dips with the lid rather than shining on through it. */
+const blinkState = { next: 2.5, at: -10, amount: 0, double: false };
+
+function updateEyes(now, dt, excite) {
+  if (reduced) {
+    eyeUniforms.uEyeGlow.value = 1;
+    for (const lamp of eyeLamps) lamp.intensity = EYES.lamp;
+    return;
+  }
+
+  if (now > blinkState.next) {
+    blinkState.at = now;
+    if (blinkState.double) {
+      blinkState.double = false;
+      blinkState.next = now + 0.34; // second half of a double blink
+    } else {
+      blinkState.double = Math.random() < 0.18;
+      blinkState.next = now + (blinkState.double ? 0.34 : 2.6 + Math.random() * 4.5);
+    }
+  }
+
+  const CLOSE = 0.09, OPEN = 0.17;
+  const since = now - blinkState.at;
+  let amount = 0;
+  if (since >= 0 && since < CLOSE) amount = since / CLOSE;
+  else if (since < CLOSE + OPEN) amount = 1 - (since - CLOSE) / OPEN;
+  amount = amount * amount * (3 - 2 * amount); // ease, so the lid never snaps
+
+  blinkState.amount += (amount - blinkState.amount) * (1 - Math.exp(-40 * dt));
+  for (const mesh of viewer.blinkMeshes) mesh.morphTargetInfluences[0] = blinkState.amount;
+
+  /* the glow follows the lid, and flares while he is answering */
+  const open = 1 - blinkState.amount * 0.92;
+  const flare = 1 + excite * 0.7;
+  eyeUniforms.uEyeGlow.value = open * flare * (0.94 + 0.06 * Math.sin(now * 1.7));
+  for (const lamp of eyeLamps) lamp.intensity = EYES.lamp * open * flare;
+}
 
 /* ---------- render loop ---------- */
 
@@ -756,6 +945,8 @@ renderer.setAnimationLoop((t) => {
   head.position.y += (1 - inE) * -0.9;
   const sc = 0.86 + 0.14 * inE;
   head.scale.setScalar(sc);
+
+  updateEyes(t / 1000, dt, s.excite);
 
   /* ease the marble palette toward the selected stone */
   if (marbleState.uniforms) {
