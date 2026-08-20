@@ -73,7 +73,7 @@
           <span>smooth</span><input id="smooth" type="range" min="0" max="12" step="1" value="8" /><b id="smoothv">8</b>
         </div>
         <div class="row">
-          <span>lash carry</span><input id="carry" type="range" min="0" max="1" step="0.05" value="0.6" /><b id="carryv">0.60</b>
+          <span>lash swing</span><input id="carry" type="range" min="0" max="1.6" step="0.05" value="1" /><b id="carryv">1.00</b>
         </div>
         <div class="hint">the upper lid rolls forward and lands on the lip of the lower lid; lashes ride along with it without deforming. paint both lids first.</div>
       </div>
@@ -788,19 +788,56 @@
           sideOf.push(sIdx); fbinOfV.push(fb); kind.push(l === 2 ? 0 : 1);
         }
 
-        const lashIdx = [], lashSide = [], lashFbin = [], lashKind = [];
         const isLash = new Uint8Array(n);
+        for (let i = 0; i < n; i++) if (labelOf[i] === 4) isLash[i] = 1;
+
+        /* A lash ridge is one connected object. Find each one and let it
+           decide, as a whole, which lid it hangs from — classifying vertex
+           by vertex draws a line through the middle of a ridge and tears it
+           in two when the lids move differently. */
+        const compOf = new Int32Array(n).fill(-1);
+        const compKind = [];
+        {
+          const adj = adjacency;
+          for (let seed = 0; seed < n; seed++) {
+            if (!isLash[seed] || compOf[seed] >= 0) continue;
+            const id = compKind.length;
+            const stack = [seed];
+            compOf[seed] = id;
+            const members = [];
+            let upperVotes = 0, total = 0;
+            while (stack.length) {
+              const v = stack.pop();
+              members.push(v);
+              const x = basePositions[v * 3], y = basePositions[v * 3 + 1];
+              const sIdx = x < 0 ? 0 : 1;
+              if (isFinite(sides[sIdx].xMin)) {
+                const fb = fbinOf(sides[sIdx], x);
+                const upLo = sample(colUpY, sIdx, fb), lip = sample(colLipY, sIdx, fb);
+                if (!isNaN(upLo) && !isNaN(lip)) {
+                  total++;
+                  if (y >= (upLo + lip) / 2) upperVotes++;
+                }
+              }
+              for (let k = adj.start[v]; k < adj.start[v + 1]; k++) {
+                const u = adj.list[k];
+                if (isLash[u] && compOf[u] < 0) { compOf[u] = id; stack.push(u); }
+              }
+            }
+            compKind.push(total && upperVotes * 2 < total ? 1 : 0); // majority wins
+          }
+        }
+
+        const lashIdx = [], lashSide = [], lashFbin = [], lashKind = [];
         for (let i = 0; i < n; i++) {
-          if (labelOf[i] !== 4) continue;
-          isLash[i] = 1;
-          const x = basePositions[i * 3], y = basePositions[i * 3 + 1];
+          if (!isLash[i]) continue;
+          const x = basePositions[i * 3];
           const sIdx = x < 0 ? 0 : 1;
           if (!isFinite(sides[sIdx].xMin)) continue;
-          const fb = fbinOf(sides[sIdx], x);
-          const upLo = sample(colUpY, sIdx, fb), lip = sample(colLipY, sIdx, fb);
-          if (isNaN(upLo) || isNaN(lip)) continue;
-          lashIdx.push(i); lashSide.push(sIdx); lashFbin.push(fb);
-          lashKind.push(y >= (upLo + lip) / 2 ? 0 : 1); // upper or lower lash
+          lashIdx.push(i);
+          lashSide.push(sIdx);
+          lashFbin.push(fbinOf(sides[sIdx], x));
+          lashKind.push(compKind[compOf[i]] ?? 0); // whole ridge, one answer
         }
 
         /* the margin band of each column: the lid vertices a lash is
@@ -847,6 +884,8 @@
           marginBand,
           bandY: new Float32Array(COLS * 2),
           bandZ: new Float32Array(COLS * 2),
+          /* per kind, per side, per bin: cos, sin, rest centroid, now centroid */
+          fit: new Float32Array(2 * 2 * BINS * 6),
           colUpY, colUpZ, colLipY, colLipZ,
           meetY: new Float32Array(COLS).fill(NaN),
           meetZ: new Float32Array(COLS).fill(NaN),
@@ -949,116 +988,189 @@
           }
         }
 
-        /* Now read the lid's ACTUAL travel back off the margin of each column
-           and hand it to the lashes whole. Because it is measured after the
-           smoothing, the lashes track whatever the lid really did — they
-           cannot drift off it — and because every lash vertex in a column
-           gets the same vector, each lash moves as one solid piece. */
-        const { bandY, bandZ, marginBand } = p;
-        bandY.fill(NaN);
-        bandZ.fill(NaN);
-        for (let j = 0; j < marginBand.length; j++) {
-          const band = marginBand[j];
-          if (!band.length) continue;
-          let sy = 0, sz = 0;
-          for (const v of band) { sy += disp[v * 3 + 1]; sz += disp[v * 3 + 2]; }
-          bandY[j] = sy / band.length;
-          bandZ[j] = sz / band.length;
-        }
-        /* columns whose margin was never painted borrow the nearest that was */
+        /* The lashes are two solid ridges (one per eye, confirmed by
+           connected components) glued along the upper lid margin. Handing
+           them the lid's local TRANSLATION was the mistake: at the canthus
+           the lids already touch, translation there is genuinely zero, and
+           the lash tips were left hanging in space.
+
+           What actually carries a lash is the lid's rigid MOTION at the
+           point it is rooted to - rotation as well as translation. A hinge
+           swings a tip even where the root hardly travels. So for each slice
+           of the margin, fit the rigid motion the lid really underwent
+           (measured after smoothing, so the lash cannot drift off it) and
+           put the lash through the same transform.
+
+           The fit is done in the y-z plane: the lid rolls about an axis that
+           runs along the lash line, so its motion there is a plane rotation
+           plus an offset, and a 2D fit has a closed form - no SVD needed. */
+        /* The lashes are two solid ridges (one per eye, confirmed by connected
+           components) hinged along the upper lid. Their motion splits in two:
+
+             swing    - ONE rotation for the whole ridge, fitted from how the
+                        lid actually moved. Because every point turns about
+                        the same distant hinge, a tip sweeps far while a root
+                        beside the hinge barely stirs, which is the behaviour
+                        that was missing.
+             residual - a small per-slice offset that puts the ridge back
+                        exactly on the lid, so it stays welded along its
+                        whole length rather than only matching on average.
+
+           Fitting a rotation per slice does not work: each slice's centre of
+           rotation sits right next to it, so the corners cannot move no
+           matter how large the angle. The fit is a plane one in y-z, where
+           the lid's roll lives, so it has a closed form. */
+        const swing = +document.getElementById("carry").value;
+        const FIT = p.fit;
+        FIT.fill(NaN);
+
         for (let kind = 0; kind < 2; kind++) {
           for (let sIdx = 0; sIdx < 2; sIdx++) {
+            /* one rigid fit over the whole lid of this eye */
+            const members = [];
+            let pY = 0, pZ = 0, qY = 0, qZ = 0, n = 0;
+            for (let k = 0; k < p.idx.length; k++) {
+              if (p.kind[k] !== kind || p.side[k] !== sIdx) continue;
+              if (p.W[k] < 0.35) continue; // the travelling half, not the crease
+              const v = p.idx[k], o = k * 3;
+              const ry = p.P[o + 1], rz = p.P[o + 2];
+              const cy = ry + disp[v * 3 + 1], cz = rz + disp[v * 3 + 2];
+              members.push([p.fbin[k], ry, rz, cy, cz]);
+              pY += ry; pZ += rz; qY += cy; qZ += cz; n++;
+            }
+            if (n < 6) continue;
+            pY /= n; pZ /= n; qY /= n; qZ /= n;
+            let cross = 0, dot = 0;
+            for (const [, ry, rz, cy, cz] of members) {
+              const ay = ry - pY, az = rz - pZ;
+              const by = cy - qY, bz = cz - qZ;
+              cross += ay * bz - az * by;
+              dot += ay * by + az * bz;
+            }
+            const theta = Math.atan2(cross, dot) * swing;
+            const cs = Math.cos(theta), sn = Math.sin(theta);
+
+            /* per slice: where the global swing puts the lid versus where it
+               really went. That gap is the offset the ridge needs. */
+            const sumRY = new Float64Array(BINS), sumRZ = new Float64Array(BINS);
+            const sumCY = new Float64Array(BINS), sumCZ = new Float64Array(BINS);
+            const cnt = new Float64Array(BINS);
+            for (const [fb, ry, rz, cy, cz] of members) {
+              const bin = Math.max(0, Math.min(BINS - 1, Math.round(fb)));
+              sumRY[bin] += ry; sumRZ[bin] += rz;
+              sumCY[bin] += cy; sumCZ[bin] += cz;
+              cnt[bin]++;
+            }
+            const resY = new Float32Array(BINS).fill(NaN);
+            const resZ = new Float32Array(BINS).fill(NaN);
             for (let bin = 0; bin < BINS; bin++) {
-              const j = (sIdx * BINS + bin) * 2 + kind;
-              if (!isNaN(bandY[j])) continue;
+              if (cnt[bin] < 2) continue;
+              const ry = sumRY[bin] / cnt[bin], rz = sumRZ[bin] / cnt[bin];
+              const cy = sumCY[bin] / cnt[bin], cz = sumCZ[bin] / cnt[bin];
+              const ay = ry - pY, az = rz - pZ;
+              resY[bin] = cy - (qY + cs * ay - sn * az);
+              resZ[bin] = cz - (qZ + sn * ay + cs * az);
+            }
+            /* slices with no lid under them borrow the nearest that has it,
+               then the offsets are eased so the ridge bends smoothly */
+            for (let bin = 0; bin < BINS; bin++) {
+              if (!isNaN(resY[bin])) continue;
               let best = -1, bestD = 1e9;
               for (let c = 0; c < BINS; c++) {
-                const jj = (sIdx * BINS + c) * 2 + kind;
-                if (isNaN(bandY[jj])) continue;
+                if (isNaN(resY[c])) continue;
                 const d = Math.abs(c - bin);
-                if (d < bestD) { bestD = d; best = jj; }
+                if (d < bestD) { bestD = d; best = c; }
               }
-              if (best >= 0) { bandY[j] = bandY[best]; bandZ[j] = bandZ[best]; }
+              if (best >= 0) { resY[bin] = resY[best]; resZ[bin] = resZ[best]; }
             }
-          }
-        }
-        /* A lash ridge is one stiff object, so it cannot travel fully at one
-           end and not at all a few millimetres away - it swings instead. The
-           per-column travel is therefore blurred wide along the lash line,
-           which carries the outer-corner lashes (whose own column sits at
-           the canthus, where the lids already touch and nothing moves) with
-           their neighbours rather than leaving them pinned in space. */
-        /* A lash is a long stiff appendage: it is carried by the lid's swing,
-           not by the travel of the single point it is rooted at. Left purely
-           local, lashes at the canthus freeze - their own column sits where
-           the lids already touch and nothing moves - while their neighbours
-           travel, which reads as tips pinned in mid-air. Blending each
-           column toward the strip's peak travel carries the whole ridge. */
-        {
-          const carry = +document.getElementById("carry").value;
-          for (let kind = 0; kind < 2; kind++) {
-            for (let sIdx = 0; sIdx < 2; sIdx++) {
-              let peakY = 0, peakZ = 0, best = -1;
+            for (let pass = 0; pass < 2; pass++) {
+              const y0 = resY.slice(), z0 = resZ.slice();
               for (let bin = 0; bin < BINS; bin++) {
-                const j = (sIdx * BINS + bin) * 2 + kind;
-                if (isNaN(bandY[j])) continue;
-                const mag = Math.abs(bandY[j]) + Math.abs(bandZ[j]);
-                if (mag > best) { best = mag; peakY = bandY[j]; peakZ = bandZ[j]; }
-              }
-              if (best < 0) continue;
-              for (let bin = 0; bin < BINS; bin++) {
-                const j = (sIdx * BINS + bin) * 2 + kind;
-                if (isNaN(bandY[j])) continue;
-                bandY[j] = bandY[j] * (1 - carry) + peakY * carry;
-                bandZ[j] = bandZ[j] * (1 - carry) + peakZ * carry;
-              }
-            }
-          }
-        }
-
-        {
-          const RADIUS = 5, PASSES = 3;
-          for (let pass = 0; pass < PASSES; pass++) {
-            const srcY = bandY.slice(), srcZ = bandZ.slice();
-            for (let kind = 0; kind < 2; kind++) {
-              for (let sIdx = 0; sIdx < 2; sIdx++) {
-                for (let bin = 0; bin < BINS; bin++) {
-                  const j = (sIdx * BINS + bin) * 2 + kind;
-                  if (isNaN(srcY[j])) continue;
-                  let sy = 0, sz = 0, w = 0;
-                  for (let d = -RADIUS; d <= RADIUS; d++) {
-                    const bb = bin + d;
-                    if (bb < 0 || bb >= BINS) continue;
-                    const jj = (sIdx * BINS + bb) * 2 + kind;
-                    if (isNaN(srcY[jj])) continue;
-                    const wgt = 1 - Math.abs(d) / (RADIUS + 1);
-                    sy += srcY[jj] * wgt; sz += srcZ[jj] * wgt; w += wgt;
-                  }
-                  if (w > 0) { bandY[j] = sy / w; bandZ[j] = sz / w; }
+                let sy = 0, sz = 0, w = 0;
+                for (let d = -3; d <= 3; d++) {
+                  const bb = bin + d;
+                  if (bb < 0 || bb >= BINS || isNaN(y0[bb])) continue;
+                  const wt = 1 - Math.abs(d) / 4;
+                  sy += y0[bb] * wt; sz += z0[bb] * wt; w += wt;
                 }
+                if (w > 0) { resY[bin] = sy / w; resZ[bin] = sz / w; }
               }
+            }
+
+            const base = (kind * 2 + sIdx) * BINS;
+            for (let bin = 0; bin < BINS; bin++) {
+              const o = (base + bin) * 6;
+              FIT[o] = cs;
+              FIT[o + 1] = sn;
+              FIT[o + 2] = pY;
+              FIT[o + 3] = pZ;
+              FIT[o + 4] = qY + (isNaN(resY[bin]) ? 0 : resY[bin]);
+              FIT[o + 5] = qZ + (isNaN(resZ[bin]) ? 0 : resZ[bin]);
             }
           }
         }
 
+        /*Each lash vertex swings about its ridge's hinge, then takes the local
+           offset of the slice it is rooted to, blended between slices */
         for (let k = 0; k < p.lashIdx.length; k++) {
-          const kind = p.lashKind[k];
-          const base = p.lashSide[k] * BINS;
+          const kind = p.lashKind[k], sIdx = p.lashSide[k];
           const fb = p.lashFbin[k];
-          const b0 = Math.floor(fb), t = fb - b0;
-          const j0 = (base + Math.max(0, Math.min(BINS - 1, b0))) * 2 + kind;
-          const j1 = (base + Math.max(0, Math.min(BINS - 1, b0 + 1))) * 2 + kind;
-          let dy = bandY[j0], dz = bandZ[j0];
-          if (!isNaN(bandY[j1]) && !isNaN(dy)) {
-            dy += (bandY[j1] - dy) * t;
-            dz += (bandZ[j1] - dz) * t;
-          } else if (isNaN(dy)) {
-            dy = bandY[j1]; dz = bandZ[j1];
+          const b0 = Math.max(0, Math.min(BINS - 1, Math.floor(fb)));
+          const b1 = Math.max(0, Math.min(BINS - 1, b0 + 1));
+          const t = Math.max(0, Math.min(1, fb - Math.floor(fb)));
+          let base = (kind * 2 + sIdx) * BINS;
+          if (isNaN(FIT[base * 6])) base = ((1 - kind) * 2 + sIdx) * BINS; // try the other lid
+          let o0 = (base + b0) * 6, o1 = (base + b1) * 6;
+          if (isNaN(FIT[o0])) {
+            /* a slice with no fit at all would otherwise sit still while its
+               neighbours travel, which is exactly what tears a ridge */
+            let best = -1, bestD = 1e9;
+            for (let c = 0; c < BINS; c++) {
+              const oc = (base + c) * 6;
+              if (isNaN(FIT[oc])) continue;
+              const d = Math.abs(c - b0);
+              if (d < bestD) { bestD = d; best = oc; }
+            }
+            if (best < 0) continue;
+            o0 = best; o1 = best;
           }
-          if (isNaN(dy)) continue;
-          const i = p.lashIdx[k] * 3;
-          disp[i + 1] = dy;
-          disp[i + 2] = dz;
+          const cs = FIT[o0], sn = FIT[o0 + 1];
+          const pY = FIT[o0 + 2], pZ = FIT[o0 + 3];
+          const qY = FIT[o0 + 4] * (1 - t) + (isNaN(FIT[o1 + 4]) ? FIT[o0 + 4] : FIT[o1 + 4]) * t;
+          const qZ = FIT[o0 + 5] * (1 - t) + (isNaN(FIT[o1 + 5]) ? FIT[o0 + 5] : FIT[o1 + 5]) * t;
+          const i = p.lashIdx[k];
+          const ay = basePositions[i * 3 + 1] - pY;
+          const az = basePositions[i * 3 + 2] - pZ;
+          disp[i * 3 + 1] = qY + cs * ay - sn * az - basePositions[i * 3 + 1];
+          disp[i * 3 + 2] = qZ + sn * ay + cs * az - basePositions[i * 3 + 2];
+        }
+
+        /* Weld the join. The ridge is rigid and the lid it sits on is not, so
+           the two disagree slightly right where they meet. A few passes over
+           the LID side only - lashes contribute their motion but are never
+           altered - pull the skin up to the ridge, so the seam closes without
+           the ridge losing its rigidity. */
+        {
+          const { start, list } = adjacency;
+          const src = disp, dst = p.disp2;
+          for (let pass = 0; pass < 3; pass++) {
+            for (const i of p.affected) {
+              if (p.isLash[i]) continue;
+              let sx = src[i * 3], sy = src[i * 3 + 1], sz = src[i * 3 + 2], cnt = 1;
+              for (let k = start[i]; k < start[i + 1]; k++) {
+                const v = list[k];
+                sx += src[v * 3]; sy += src[v * 3 + 1]; sz += src[v * 3 + 2];
+                cnt++;
+              }
+              dst[i * 3] = sx / cnt; dst[i * 3 + 1] = sy / cnt; dst[i * 3 + 2] = sz / cnt;
+            }
+            for (const i of p.affected) {
+              if (p.isLash[i]) continue;
+              src[i * 3] = dst[i * 3];
+              src[i * 3 + 1] = dst[i * 3 + 1];
+              src[i * 3 + 2] = dst[i * 3 + 2];
+            }
+          }
         }
 
         for (const i of p.affected) {
