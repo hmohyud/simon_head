@@ -63,7 +63,22 @@
         <div class="row">
           <span>test blink</span><input id="blink" type="range" min="0" max="1" step="0.02" value="0" /><b id="blinkv">0.00</b>
         </div>
-        <div class="hint">moves whatever you tagged as upper lid (and lashes) so you can see how a blink would read before committing.</div>
+        <div class="row">
+          <span>curve</span><input id="curve" type="range" min="0" max="0.06" step="0.002" value="0.022" /><b id="curvev">0.022</b>
+        </div>
+        <div class="row">
+          <span>lower rise</span><input id="meet" type="range" min="0" max="0.45" step="0.01" value="0.16" /><b id="meetv">0.16</b>
+        </div>
+        <div class="row">
+          <span>smooth</span><input id="smooth" type="range" min="0" max="8" step="1" value="3" /><b id="smoothv">3</b>
+        </div>
+        <div class="hint">the upper lid rolls forward and lands on the lip of the lower lid; lashes ride along with it without deforming. paint both lids first.</div>
+      </div>
+
+      <div class="sec">
+        <div class="btns"><button id="repair">repair gaps</button><button id="unrepair">undo repair</button></div>
+        <div class="line"><span>show fixes</span><input id="showfix" type="checkbox" checked /></div>
+        <div class="hint">fills pinholes the brush skipped and drops stray specks, using the mesh's own connectivity. repaired vertices glow white until you untick this.</div>
       </div>
 
       <div class="sec">
@@ -158,6 +173,9 @@
       let stamps = [];
       let activeLabel = 0;
       let erasing = false;
+      let adjacency = null; // CSR neighbour lists, for the repair pass
+      let autoFlag = null; // 1 where the repair changed a vertex
+      let meanEdge = 0.006;
 
       /* ---------- ui ---------- */
 
@@ -242,6 +260,8 @@
             scene.add(mesh);
             basePositions = geo.getAttribute("position").array.slice();
             labelOf = new Uint8Array(n);
+            autoFlag = new Uint8Array(n);
+            buildAdjacency();
             buildGrid();
             replayStamps();
             say(`${file} — ${n.toLocaleString()} verts. drag to paint.`);
@@ -249,6 +269,40 @@
           undefined,
           () => say("could not load " + file)
         );
+      }
+
+      /* Vertex neighbour lists in CSR form (counts, then a prefix sum, then
+         a fill) — a Set per vertex would be far heavier at this size. The
+         repair pass votes over these neighbours. */
+      function buildAdjacency() {
+        const geo = mesh.geometry;
+        const idx = geo.getIndex().array;
+        const n = geo.getAttribute("position").count;
+        const deg = new Uint32Array(n);
+        for (let i = 0; i < idx.length; i += 3) {
+          deg[idx[i]] += 2;
+          deg[idx[i + 1]] += 2;
+          deg[idx[i + 2]] += 2;
+        }
+        const start = new Uint32Array(n + 1);
+        for (let i = 0; i < n; i++) start[i + 1] = start[i] + deg[i];
+        const list = new Uint32Array(start[n]);
+        const cur = start.slice(0, n);
+        let edgeSum = 0;
+        const pos = geo.getAttribute("position");
+        for (let i = 0; i < idx.length; i += 3) {
+          const a = idx[i], b = idx[i + 1], c = idx[i + 2];
+          list[cur[a]++] = b; list[cur[a]++] = c;
+          list[cur[b]++] = a; list[cur[b]++] = c;
+          list[cur[c]++] = a; list[cur[c]++] = b;
+          if (i % 300 === 0) {
+            edgeSum += Math.hypot(
+              pos.getX(a) - pos.getX(b), pos.getY(a) - pos.getY(b), pos.getZ(a) - pos.getZ(b)
+            );
+          }
+        }
+        meanEdge = Math.max(0.003, edgeSum / Math.max(1, Math.floor(idx.length / 300)));
+        adjacency = { start, list };
       }
 
       /* uniform grid over the vertices, so a brush dab only tests nearby
@@ -296,17 +350,22 @@
         if (refresh) paintColors(hits);
       }
 
+      const LABEL_RGB = LABELS.map((l) => {
+        const c = new THREE.Color(l.color);
+        return [c.r, c.g, c.b];
+      });
+
       function paintColors(indices) {
         const col = mesh.geometry.getAttribute("color");
+        const showFix = document.getElementById("showfix")?.checked;
         for (const i of indices) {
           const l = labelOf[i];
-          if (!l) col.setXYZ(i, 0.82, 0.82, 0.82);
-          else {
-            const c = new THREE.Color(LABELS[l - 1].color);
-            col.setXYZ(i, c.r, c.g, c.b);
-          }
+          if (showFix && autoFlag && autoFlag[i]) col.setXYZ(i, 1, 1, 1); // repaired
+          else if (!l) col.setXYZ(i, 0.82, 0.82, 0.82);
+          else col.setXYZ(i, LABEL_RGB[l - 1][0], LABEL_RGB[l - 1][1], LABEL_RGB[l - 1][2]);
         }
         col.needsUpdate = true;
+        blinkDirty = true;
         updateCounts();
       }
 
@@ -318,7 +377,10 @@
 
       function replayStamps() {
         labelOf.fill(0);
-        for (const st of stamps) applyStamp(st, false);
+        for (const st of stamps) if (!st.auto) applyStamp(st, false);
+        const manual = labelOf.slice();
+        for (const st of stamps) if (st.auto) applyStamp(st, false);
+        if (autoFlag) for (let i = 0; i < labelOf.length; i++) autoFlag[i] = labelOf[i] !== manual[i] ? 1 : 0;
         paintColors([...labelOf.keys()]);
       }
 
@@ -374,30 +436,443 @@
       });
       renderer.domElement.addEventListener("contextmenu", (e) => e.preventDefault());
 
+      /* ---------- repair ---------- */
+
+      /* Two passes over the mesh graph:
+         1. FILL — an unpainted vertex most of whose neighbours share one
+            label is a hole in a stroke, not open space. Requiring a clear
+            majority (not just any painted neighbour) is what stops the
+            regions from creeping outward at their edges.
+         2. SPECKS — connected runs of a label smaller than a few vertices
+            are stray dabs, so they go.
+         Both are written back as ordinary stamps flagged auto:true, so the
+         export stays one uniform, model-independent format. */
+      function repairRegions() {
+        if (!mesh || !adjacency) return;
+        stamps = stamps.filter((st) => !st.auto); // start from the hand-painted state
+        replayStamps();
+
+        const { start, list } = adjacency;
+        const n = labelOf.length;
+        const work = labelOf.slice();
+        let filled = 0;
+
+        for (let pass = 0; pass < 3; pass++) {
+          const next = work.slice();
+          for (let i = 0; i < n; i++) {
+            if (work[i]) continue;
+            const votes = [0, 0, 0, 0, 0];
+            let painted = 0, total = 0;
+            for (let k = start[i]; k < start[i + 1]; k++) {
+              const l = work[list[k]];
+              total++;
+              if (l) { votes[l]++; painted++; }
+            }
+            if (total < 3) continue;
+            let best = 0, bestN = 0;
+            for (let l = 1; l <= 4; l++) if (votes[l] > bestN) { bestN = votes[l]; best = l; }
+            /* a clear majority of neighbours, not merely a few */
+            if (best && bestN / total >= 0.62 && painted / total >= 0.7) {
+              next[i] = best;
+              filled++;
+            }
+          }
+          work.set(next);
+        }
+
+        /* speck removal: flood each label region, drop the tiny ones */
+        const seen = new Uint8Array(n);
+        const queue = new Int32Array(n);
+        const removed = [];
+        for (let i = 0; i < n; i++) {
+          if (seen[i] || !work[i]) continue;
+          const label = work[i];
+          let head = 0, tail = 0;
+          queue[tail++] = i;
+          seen[i] = 1;
+          const members = [];
+          while (head < tail) {
+            const v = queue[head++];
+            members.push(v);
+            for (let k = start[v]; k < start[v + 1]; k++) {
+              const u = list[k];
+              if (!seen[u] && work[u] === label) { seen[u] = 1; queue[tail++] = u; }
+            }
+          }
+          if (members.length < 8) {
+            for (const v of members) { work[v] = 0; removed.push(v); }
+          }
+        }
+
+        /* write the differences back as auto stamps */
+        const r = Math.max(0.004, meanEdge * 0.75);
+        const autoStamps = [];
+        for (let i = 0; i < n; i++) {
+          if (work[i] === labelOf[i]) continue;
+          autoStamps.push({
+            l: work[i] ? work[i] - 1 : -1,
+            x: +basePositions[i * 3].toFixed(4),
+            y: +basePositions[i * 3 + 1].toFixed(4),
+            z: +basePositions[i * 3 + 2].toFixed(4),
+            r,
+            auto: true,
+          });
+        }
+        stamps = stamps.concat(autoStamps);
+        save();
+        replayStamps();
+        say(
+          `repaired: filled ${filled} gap vertices, dropped ${removed.length} speck vertices ` +
+            `(${autoStamps.length} auto stamps). white = changed.`
+        );
+      }
+
+      document.getElementById("repair").onclick = repairRegions;
+      document.getElementById("unrepair").onclick = () => {
+        stamps = stamps.filter((st) => !st.auto);
+        save();
+        replayStamps();
+        say("repair removed — back to what you painted by hand");
+      };
+      document.getElementById("showfix").onchange = () => paintColors([...labelOf.keys()]);
+
       /* ---------- blink preview ---------- */
+
+      /* How a real blink works, and what this mirrors:
+         - the upper lid travels much further than the lower one, so it does
+           most of the closing
+         - the lower lid still rises to meet it ("lower rise"), and the two
+           meet along a line BELOW the eye's midpoint rather than at the
+           lower lid's resting edge
+         - the upper lid rolls forward over the eyeball on the way down, so
+           the path is a curve, not a straight drop
+         - lashes do not stretch: each is carried by the margin it grows
+           from, as one rigid translation, so it keeps its shape
+
+         Two things stop that reading as jagged. The per-column profiles are
+         blurred and sampled with fractional interpolation, so travel varies
+         continuously across the eye instead of stepping between bins. And
+         the finished displacement field is relaxed over the mesh graph,
+         which feathers the rigid lash motion into the weighted lid motion
+         (and into the untouched skin at the edges of the selection). */
+      const BINS = 56;
+      let blinkPlan = null;
+      let blinkDirty = true;
+
+      /* blur a per-column profile, skipping gaps, so extremes picked per bin
+         become a smooth curve */
+      function smoothProfile(arr, passes) {
+        for (let pass = 0; pass < passes; pass++) {
+          const copy = arr.slice();
+          for (let sIdx = 0; sIdx < 2; sIdx++) {
+            for (let bin = 0; bin < BINS; bin++) {
+              const j = sIdx * BINS + bin;
+              if (isNaN(copy[j])) continue;
+              let sum = copy[j], n = 1;
+              for (const d of [-2, -1, 1, 2]) {
+                const bb = bin + d;
+                if (bb < 0 || bb >= BINS) continue;
+                const v = copy[sIdx * BINS + bb];
+                if (isNaN(v)) continue;
+                const wgt = Math.abs(d) === 1 ? 1 : 0.5;
+                sum += v * wgt;
+                n += wgt;
+              }
+              arr[j] = sum / n;
+            }
+          }
+        }
+      }
+
+      function buildBlinkPlan() {
+        blinkDirty = false;
+        blinkPlan = null;
+        if (!mesh || !adjacency) return;
+        const n = labelOf.length;
+
+        const side = () => ({
+          upLo: new Float32Array(BINS).fill(Infinity),
+          upLoZ: new Float32Array(BINS).fill(NaN),
+          upHi: new Float32Array(BINS).fill(-Infinity),
+          lipY: new Float32Array(BINS).fill(NaN),
+          lipZ: new Float32Array(BINS).fill(NaN),
+          loLo: new Float32Array(BINS).fill(Infinity),
+          xMin: Infinity,
+          xMax: -Infinity,
+        });
+        const sides = [side(), side()];
+
+        for (let i = 0; i < n; i++) {
+          const l = labelOf[i];
+          if (l !== 2 && l !== 3) continue;
+          const x = basePositions[i * 3];
+          const s2 = sides[x < 0 ? 0 : 1];
+          if (x < s2.xMin) s2.xMin = x;
+          if (x > s2.xMax) s2.xMax = x;
+        }
+        /* fractional bin: keeps travel continuous across the eye */
+        const fbinOf = (s2, x) =>
+          Math.max(0, Math.min(BINS - 1,
+            ((x - s2.xMin) / Math.max(1e-6, s2.xMax - s2.xMin)) * (BINS - 1)));
+
+        let lowerCount = 0;
+        for (let i = 0; i < n; i++) {
+          const l = labelOf[i];
+          if (l !== 2 && l !== 3) continue;
+          const x = basePositions[i * 3], y = basePositions[i * 3 + 1], z = basePositions[i * 3 + 2];
+          const s2 = sides[x < 0 ? 0 : 1];
+          const bin = Math.round(fbinOf(s2, x));
+          if (l === 3) {
+            lowerCount++;
+            if (isNaN(s2.lipY[bin]) || y > s2.lipY[bin]) { s2.lipY[bin] = y; s2.lipZ[bin] = z; }
+            if (y < s2.loLo[bin]) s2.loLo[bin] = y;
+          } else {
+            if (y < s2.upLo[bin]) { s2.upLo[bin] = y; s2.upLoZ[bin] = z; }
+            if (y > s2.upHi[bin]) s2.upHi[bin] = y;
+          }
+        }
+        if (!lowerCount) {
+          say("paint the lower lid too — the upper lid needs something to meet.");
+          return;
+        }
+
+        const COLS = 2 * BINS;
+        const colUpY = new Float32Array(COLS).fill(NaN);
+        const colUpZ = new Float32Array(COLS).fill(NaN);
+        const colUpHi = new Float32Array(COLS).fill(NaN);
+        const colLipY = new Float32Array(COLS).fill(NaN);
+        const colLipZ = new Float32Array(COLS).fill(NaN);
+        const colLoLo = new Float32Array(COLS).fill(NaN);
+        for (let sIdx = 0; sIdx < 2; sIdx++) {
+          const s2 = sides[sIdx];
+          for (let bin = 0; bin < BINS; bin++) {
+            const j = sIdx * BINS + bin;
+            if (isFinite(s2.upLo[bin])) {
+              colUpY[j] = s2.upLo[bin];
+              colUpZ[j] = isNaN(s2.upLoZ[bin]) ? 0 : s2.upLoZ[bin];
+              colUpHi[j] = s2.upHi[bin];
+            }
+            if (!isNaN(s2.lipY[bin])) {
+              colLipY[j] = s2.lipY[bin];
+              colLipZ[j] = s2.lipZ[bin];
+              colLoLo[j] = isFinite(s2.loLo[bin]) ? s2.loLo[bin] : s2.lipY[bin];
+            }
+          }
+        }
+        /* per-bin extremes are noisy by nature — blur them into curves */
+        for (const arr of [colUpY, colUpZ, colUpHi, colLipY, colLipZ, colLoLo]) smoothProfile(arr, 3);
+
+        const sample = (arr, sIdx, fbin) => {
+          const base = sIdx * BINS;
+          const b0 = Math.floor(fbin);
+          const t = fbin - b0;
+          const i0 = base + Math.max(0, Math.min(BINS - 1, b0));
+          const i1 = base + Math.max(0, Math.min(BINS - 1, b0 + 1));
+          const v0 = arr[i0], v1 = arr[i1];
+          if (isNaN(v0)) return v1;
+          if (isNaN(v1)) return v0;
+          return v0 + (v1 - v0) * t;
+        };
+
+        const idx = [], P = [], W = [], sideOf = [], fbinOfV = [], kind = [];
+        for (let i = 0; i < n; i++) {
+          const l = labelOf[i];
+          if (l !== 2 && l !== 3) continue;
+          const x = basePositions[i * 3], y = basePositions[i * 3 + 1], z = basePositions[i * 3 + 2];
+          const sIdx = x < 0 ? 0 : 1;
+          const fb = fbinOf(sides[sIdx], x);
+          const upLo = sample(colUpY, sIdx, fb), upHi = sample(colUpHi, sIdx, fb);
+          const lip = sample(colLipY, sIdx, fb), loLo = sample(colLoLo, sIdx, fb);
+          if (isNaN(upLo) || isNaN(lip)) continue;
+          let w = l === 2
+            ? (upHi - y) / Math.max(1e-5, upHi - upLo)   // 0 at crease, 1 at margin
+            : (y - loLo) / Math.max(1e-5, lip - loLo);   // 0 at base, 1 at lip
+          w = Math.max(0, Math.min(1, w));
+          w = w * w * (3 - 2 * w);
+          idx.push(i); P.push(x, y, z); W.push(w);
+          sideOf.push(sIdx); fbinOfV.push(fb); kind.push(l === 2 ? 0 : 1);
+        }
+
+        const lashIdx = [], lashSide = [], lashFbin = [], lashKind = [];
+        for (let i = 0; i < n; i++) {
+          if (labelOf[i] !== 4) continue;
+          const x = basePositions[i * 3], y = basePositions[i * 3 + 1];
+          const sIdx = x < 0 ? 0 : 1;
+          if (!isFinite(sides[sIdx].xMin)) continue;
+          const fb = fbinOf(sides[sIdx], x);
+          const upLo = sample(colUpY, sIdx, fb), lip = sample(colLipY, sIdx, fb);
+          if (isNaN(upLo) || isNaN(lip)) continue;
+          lashIdx.push(i); lashSide.push(sIdx); lashFbin.push(fb);
+          lashKind.push(y >= (upLo + lip) / 2 ? 0 : 1); // upper or lower lash
+        }
+
+        /* vertices the smoothing pass may touch: everything that moves, plus
+           two rings of neighbours to relax into */
+        const touched = new Uint8Array(n);
+        for (const i of idx) touched[i] = 1;
+        for (const i of lashIdx) touched[i] = 1;
+        const { start, list } = adjacency;
+        for (let ring = 0; ring < 2; ring++) {
+          const grow = touched.slice();
+          for (let i = 0; i < n; i++) {
+            if (!touched[i]) continue;
+            for (let k = start[i]; k < start[i + 1]; k++) grow[list[k]] = 1;
+          }
+          touched.set(grow);
+        }
+        const affected = [];
+        for (let i = 0; i < n; i++) if (touched[i]) affected.push(i);
+
+        blinkPlan = {
+          idx: Int32Array.from(idx),
+          P: Float32Array.from(P),
+          W: Float32Array.from(W),
+          side: Uint8Array.from(sideOf),
+          fbin: Float32Array.from(fbinOfV),
+          kind: Uint8Array.from(kind),
+          T: new Float32Array(P.length),
+          C: new Float32Array(P.length),
+          lashIdx: Int32Array.from(lashIdx),
+          lashSide: Uint8Array.from(lashSide),
+          lashFbin: Float32Array.from(lashFbin),
+          lashKind: Uint8Array.from(lashKind),
+          colUpY, colUpZ, colLipY, colLipZ,
+          meetY: new Float32Array(COLS).fill(NaN),
+          meetZ: new Float32Array(COLS).fill(NaN),
+          sample,
+          affected: Int32Array.from(affected),
+          disp: new Float32Array(n * 3),
+          disp2: new Float32Array(n * 3),
+          moved: touched,
+        };
+        rebuildTargets();
+      }
+
+      function rebuildTargets() {
+        if (!blinkPlan) return;
+        const bulge = +document.getElementById("curve").value;
+        const rise = +document.getElementById("meet").value;
+        const p = blinkPlan;
+        const { colUpY, colUpZ, colLipY, colLipZ, meetY, meetZ, sample } = p;
+
+        /* the meeting line: up from the lower lip toward the upper margin by
+           the rise fraction, so contact happens below the eye's midpoint */
+        for (let j = 0; j < meetY.length; j++) {
+          if (isNaN(colUpY[j]) || isNaN(colLipY[j])) { meetY[j] = NaN; meetZ[j] = NaN; continue; }
+          meetY[j] = colLipY[j] + (colUpY[j] - colLipY[j]) * rise;
+          meetZ[j] = colLipZ[j] + (colUpZ[j] - colLipZ[j]) * rise;
+        }
+
+        for (let k = 0; k < p.W.length; k++) {
+          const o = k * 3, w = p.W[k];
+          const x = p.P[o], y = p.P[o + 1], z = p.P[o + 2];
+          const my = sample(meetY, p.side[k], p.fbin[k]);
+          const mz = sample(meetZ, p.side[k], p.fbin[k]);
+          if (isNaN(my)) {
+            p.T[o] = x; p.T[o + 1] = y; p.T[o + 2] = z;
+            p.C[o] = x; p.C[o + 1] = y; p.C[o + 2] = z;
+            continue;
+          }
+          p.T[o] = x;
+          p.T[o + 1] = y + (my - y) * w;
+          p.T[o + 2] = z + (mz - z) * w;
+          const lift = (p.kind[k] === 0 ? bulge : bulge * 0.35) * w;
+          p.C[o] = x;
+          p.C[o + 1] = (y + p.T[o + 1]) / 2;
+          p.C[o + 2] = (z + p.T[o + 2]) / 2 + lift;
+        }
+      }
+
+      function applyBlink(amount) {
+        if (!mesh) return;
+        if (blinkDirty) buildBlinkPlan();
+        const pos = mesh.geometry.getAttribute("position");
+        pos.array.set(basePositions);
+        if (!blinkPlan || amount <= 0) {
+          pos.needsUpdate = true;
+          mesh.geometry.computeVertexNormals();
+          return;
+        }
+
+        const p = blinkPlan;
+        const bulge = +document.getElementById("curve").value;
+        const u = 1 - amount;
+        const c0 = u * u, c1 = 2 * u * amount, c2 = amount * amount;
+        const disp = p.disp;
+        for (const i of p.affected) { disp[i * 3] = 0; disp[i * 3 + 1] = 0; disp[i * 3 + 2] = 0; }
+
+        for (let k = 0; k < p.idx.length; k++) {
+          const i = p.idx[k] * 3, o = k * 3;
+          disp[i] = c0 * p.P[o] + c1 * p.C[o] + c2 * p.T[o] - p.P[o];
+          disp[i + 1] = c0 * p.P[o + 1] + c1 * p.C[o + 1] + c2 * p.T[o + 1] - p.P[o + 1];
+          disp[i + 2] = c0 * p.P[o + 2] + c1 * p.C[o + 2] + c2 * p.T[o + 2] - p.P[o + 2];
+        }
+
+        /* one translation per lash, taken from the margin it grows from and
+           sampled continuously along the eye so neighbours agree */
+        for (let k = 0; k < p.lashIdx.length; k++) {
+          const sIdx = p.lashSide[k], fb = p.lashFbin[k];
+          const my = p.sample(p.meetY, sIdx, fb), mz = p.sample(p.meetZ, sIdx, fb);
+          if (isNaN(my)) continue;
+          const upper = p.lashKind[k] === 0;
+          const ry = p.sample(upper ? p.colUpY : p.colLipY, sIdx, fb);
+          const rz = p.sample(upper ? p.colUpZ : p.colLipZ, sIdx, fb);
+          const cy = (ry + my) / 2;
+          const cz = (rz + mz) / 2 + (upper ? bulge : bulge * 0.35);
+          const i = p.lashIdx[k] * 3;
+          disp[i + 1] = c0 * ry + c1 * cy + c2 * my - ry;
+          disp[i + 2] = c0 * rz + c1 * cz + c2 * mz - rz;
+        }
+
+        /* Relax the displacement field over the mesh graph. Vertices outside
+           the selection hold at zero, so the motion feathers out at the
+           edges instead of ending in a hard step — and the lash/lid seam
+           blends without either side losing its overall travel. */
+        const passes = +document.getElementById("smooth").value;
+        if (passes > 0) {
+          const { start, list } = adjacency;
+          const src = disp, dst = p.disp2;
+          for (let pass = 0; pass < passes; pass++) {
+            for (const i of p.affected) {
+              let sx = src[i * 3], sy = src[i * 3 + 1], sz = src[i * 3 + 2], cnt = 1;
+              for (let k = start[i]; k < start[i + 1]; k++) {
+                const u2 = list[k];
+                sx += src[u2 * 3]; sy += src[u2 * 3 + 1]; sz += src[u2 * 3 + 2];
+                cnt++;
+              }
+              dst[i * 3] = sx / cnt; dst[i * 3 + 1] = sy / cnt; dst[i * 3 + 2] = sz / cnt;
+            }
+            for (const i of p.affected) {
+              src[i * 3] = dst[i * 3];
+              src[i * 3 + 1] = dst[i * 3 + 1];
+              src[i * 3 + 2] = dst[i * 3 + 2];
+            }
+          }
+        }
+
+        for (const i of p.affected) {
+          pos.array[i * 3] += disp[i * 3];
+          pos.array[i * 3 + 1] += disp[i * 3 + 1];
+          pos.array[i * 3 + 2] += disp[i * 3 + 2];
+        }
+        pos.needsUpdate = true;
+        mesh.geometry.computeVertexNormals();
+      }
 
       const blink = document.getElementById("blink");
       const blinkv = document.getElementById("blinkv");
       blink.oninput = () => {
         blinkv.textContent = (+blink.value).toFixed(2);
-        if (!mesh) return;
-        const amount = +blink.value;
-        const pos = mesh.geometry.getAttribute("position");
-        /* upper lid (and lashes) slide down and slightly inward; the travel
-           is scaled by the eye opening so it closes rather than shears */
-        for (let i = 0; i < pos.count; i++) {
-          const l = labelOf[i];
-          const isLid = l === 2 || l === 4; // upper lid, lashes
-          const bx = basePositions[i * 3], by = basePositions[i * 3 + 1], bz = basePositions[i * 3 + 2];
-          if (!isLid) {
-            pos.setXYZ(i, bx, by, bz);
-            continue;
-          }
-          pos.setXYZ(i, bx, by - 0.055 * amount, bz - 0.012 * amount);
-        }
-        pos.needsUpdate = true;
-        mesh.geometry.computeVertexNormals();
+        applyBlink(+blink.value);
       };
+      for (const [id, digits] of [["curve", 3], ["meet", 2], ["smooth", 0]]) {
+        const el = document.getElementById(id);
+        el.oninput = () => {
+          document.getElementById(id + "v").textContent = (+el.value).toFixed(digits);
+          rebuildTargets();
+          applyBlink(+blink.value);
+        };
+      }
 
       /* ---------- persistence ---------- */
 
@@ -472,6 +947,16 @@
         camera.updateProjectionMatrix();
         renderer.setSize(innerWidth, innerHeight);
       });
+
+      /* handle for inspecting the deformation from the console */
+      window.__paint = {
+        get mesh() { return mesh; },
+        get plan() { return blinkPlan; },
+        get labelOf() { return labelOf; },
+        get adjacency() { return adjacency; },
+        get base() { return basePositions; },
+        applyBlink,
+      };
 
       loadModel(document.getElementById("model").value);
       renderer.setAnimationLoop(() => {
