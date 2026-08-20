@@ -515,14 +515,14 @@ function makeMarbleMaterial(hasAO) {
    channel (red still carries the ambient occlusion), so the light fills
    exactly the shape that was painted, feathered at its edge. */
 const EYES = {
-  colour: "#ffd9a0",
-  intensity: 2.2, // how brightly the eye itself burns
-  lamp: 0.5, // how much light it throws onto the face
-  lampRange: 0.8,
-  lampStandoff: 0.06, // sit the lamp clear of the surface, facing out
-  lampAngle: 0.85, // beam width: light leaving an eye is a beam, not a bulb
+  colour: "#fecc81",
+  intensity: 8, // how brightly the eye itself burns
+  socket: 0, // no darkening behind it — the burn alone carries the effect
+  lamp: 0.7, // how much light it throws onto the face
+  lampRange: 0.35, // short, so the two beams do not meet on the nose bridge
+  lampStandoff: 0.01, // sit the lamp just clear of the surface
+  lampAngle: 1.4, // beam width: light leaving an eye is a beam, not a bulb
   lampShadows: !IS_MOBILE, // so the beam is blocked by the nose rather than passing through it
-  socket: 0.85, // darkening behind the light, so it reads as a source
 };
 
 const eyeUniforms = {
