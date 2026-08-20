@@ -163,6 +163,44 @@ body.ready #chat {
   opacity: 0.6;
 }
 
+/* Send button — touch devices only (see the media query below). Reaching
+   the keyboard's Enter mid-sentence is awkward on a phone, so the pill
+   gets an explicit send affordance there; desktop keeps the cleaner
+   Enter-only pill. */
+#chat-send {
+  display: none;
+  position: absolute;
+  right: 5px;
+  top: 50%;
+  transform: translateY(-50%);
+  width: 34px;
+  height: 34px;
+  border: none;
+  border-radius: 50%;
+  background: rgba(255, 255, 255, 0.07);
+  cursor: pointer;
+  opacity: 0.4; /* idle until there is something to send */
+  transition: opacity 0.2s ease, background 0.2s ease;
+}
+#chat-send::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  background: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='15' height='15' viewBox='0 0 15 15'%3E%3Cpath d='M7.5 12V3.5M7.5 3.5 3.9 7.1M7.5 3.5l3.6 3.6' fill='none' stroke='%23e8ecf3' stroke-width='1.7' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E")
+    center / 15px 15px no-repeat;
+}
+#chat.has-text #chat-send {
+  opacity: 1;
+  background: rgba(255, 255, 255, 0.16);
+}
+#chat-send:active {
+  background: rgba(255, 255, 255, 0.26);
+}
+#chat.busy #chat-send {
+  opacity: 0.35;
+  pointer-events: none;
+}
+
 /* history chevron inside the input pill */
 #chat-history-btn {
   position: absolute;
@@ -329,8 +367,30 @@ body.ready #marbles {
    bottom, so it moves to the top-right corner instead. */
 @media (max-width: 640px) {
   #marbles {
-    top: 3vh;
+    top: calc(3vh + env(safe-area-inset-top, 0px));
     bottom: auto;
     right: 3.5vw;
+  }
+}
+
+/* Touch devices: reveal the send button, and make room for it plus the
+   history chevron inside the pill. Everything grows a little — 34px
+   circles inside a taller bar are comfortable thumb targets. */
+@media (pointer: coarse), (max-width: 640px) {
+  #chat {
+    width: min(440px, 88vw);
+    bottom: calc(3vh + env(safe-area-inset-bottom, 0px));
+  }
+  #chat-send {
+    display: block;
+  }
+  #chat-input {
+    padding: 14px 84px 14px 18px;
+    font-size: 16px; /* iOS zooms the page for anything smaller on focus */
+  }
+  #chat-history-btn {
+    right: 44px;
+    width: 34px;
+    height: 34px;
   }
 }

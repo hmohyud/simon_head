@@ -71,6 +71,11 @@ export function initChat({ onThinking, onReply, getMaterial } = {}) {
     replyEl.classList.remove("show");
   });
 
+  /* the send button lights up only when there's something to send */
+  const syncSend = () => root.classList.toggle("has-text", input.value.trim().length > 0);
+  input.addEventListener("input", syncSend);
+  syncSend();
+
   const THINKING_HTML = '<span class="dots"><i></i><i></i><i></i></span>';
 
   form.addEventListener("submit", async (e) => {
@@ -78,6 +83,7 @@ export function initChat({ onThinking, onReply, getMaterial } = {}) {
     const text = input.value.trim();
     if (!text || busy) return;
     input.value = "";
+    syncSend();
     busy = true;
     root.classList.add("busy");
     replyEl.innerHTML = THINKING_HTML;
