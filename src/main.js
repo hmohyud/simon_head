@@ -521,7 +521,11 @@ const EYES = {
   lamp: 0.7, // how much light it throws onto the face
   lampRange: 0.35, // short, so the two beams do not meet on the nose bridge
   lampStandoff: 0.01, // sit the lamp just clear of the surface
-  lampAngle: 1.4, // beam width: light leaving an eye is a beam, not a bulb
+  /* Beam width: light leaving an eye is a beam, not a bulb. On desktop the
+     shadow maps stop a wide beam crossing the nose, so it can open right up;
+     mobile has no shadows to lean on, and narrows the beam instead so the
+     geometry itself keeps the light near the eye. */
+  lampAngle: IS_MOBILE ? 0.75 : 1.4,
   lampShadows: !IS_MOBILE, // so the beam is blocked by the nose rather than passing through it
 };
 
