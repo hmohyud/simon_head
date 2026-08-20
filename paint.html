@@ -804,11 +804,17 @@
             const id = compKind.length;
             const stack = [seed];
             compOf[seed] = id;
-            const members = [];
-            let upperVotes = 0, total = 0;
+            /* Which lid does this ridge grow from? Decide by what it is
+               actually joined to in the mesh — count the edges running from
+               the ridge into upper-lid versus lower-lid vertices. Asking
+               whether each vertex sits above or below the eye midline is a
+               coin flip, because a lash ridge hangs downward and most of it
+               lies below that line whichever lid it belongs to. That is what
+               classified one eye's ridge as a lower lash and left it barely
+               moving while the other closed — a wink. */
+            let touchUpper = 0, touchLower = 0, upperVotes = 0, total = 0;
             while (stack.length) {
               const v = stack.pop();
-              members.push(v);
               const x = basePositions[v * 3], y = basePositions[v * 3 + 1];
               const sIdx = x < 0 ? 0 : 1;
               if (isFinite(sides[sIdx].xMin)) {
@@ -821,10 +827,16 @@
               }
               for (let k = adj.start[v]; k < adj.start[v + 1]; k++) {
                 const u = adj.list[k];
+                if (labelOf[u] === 2) touchUpper++;
+                else if (labelOf[u] === 3) touchLower++;
                 if (isLash[u] && compOf[u] < 0) { compOf[u] = id; stack.push(u); }
               }
             }
-            compKind.push(total && upperVotes * 2 < total ? 1 : 0); // majority wins
+            compKind.push(
+              touchUpper || touchLower
+                ? (touchLower > touchUpper ? 1 : 0)
+                : (total && upperVotes * 2 < total ? 1 : 0) // nothing adjacent: fall back
+            );
           }
         }
 
