@@ -72,6 +72,9 @@
         <div class="row">
           <span>smooth</span><input id="smooth" type="range" min="0" max="12" step="1" value="8" /><b id="smoothv">8</b>
         </div>
+        <div class="row">
+          <span>lash carry</span><input id="carry" type="range" min="0" max="1" step="0.05" value="0.6" /><b id="carryv">0.60</b>
+        </div>
         <div class="hint">the upper lid rolls forward and lands on the lip of the lower lid; lashes ride along with it without deforming. paint both lids first.</div>
       </div>
 
@@ -979,6 +982,65 @@
             }
           }
         }
+        /* A lash ridge is one stiff object, so it cannot travel fully at one
+           end and not at all a few millimetres away - it swings instead. The
+           per-column travel is therefore blurred wide along the lash line,
+           which carries the outer-corner lashes (whose own column sits at
+           the canthus, where the lids already touch and nothing moves) with
+           their neighbours rather than leaving them pinned in space. */
+        /* A lash is a long stiff appendage: it is carried by the lid's swing,
+           not by the travel of the single point it is rooted at. Left purely
+           local, lashes at the canthus freeze - their own column sits where
+           the lids already touch and nothing moves - while their neighbours
+           travel, which reads as tips pinned in mid-air. Blending each
+           column toward the strip's peak travel carries the whole ridge. */
+        {
+          const carry = +document.getElementById("carry").value;
+          for (let kind = 0; kind < 2; kind++) {
+            for (let sIdx = 0; sIdx < 2; sIdx++) {
+              let peakY = 0, peakZ = 0, best = -1;
+              for (let bin = 0; bin < BINS; bin++) {
+                const j = (sIdx * BINS + bin) * 2 + kind;
+                if (isNaN(bandY[j])) continue;
+                const mag = Math.abs(bandY[j]) + Math.abs(bandZ[j]);
+                if (mag > best) { best = mag; peakY = bandY[j]; peakZ = bandZ[j]; }
+              }
+              if (best < 0) continue;
+              for (let bin = 0; bin < BINS; bin++) {
+                const j = (sIdx * BINS + bin) * 2 + kind;
+                if (isNaN(bandY[j])) continue;
+                bandY[j] = bandY[j] * (1 - carry) + peakY * carry;
+                bandZ[j] = bandZ[j] * (1 - carry) + peakZ * carry;
+              }
+            }
+          }
+        }
+
+        {
+          const RADIUS = 5, PASSES = 3;
+          for (let pass = 0; pass < PASSES; pass++) {
+            const srcY = bandY.slice(), srcZ = bandZ.slice();
+            for (let kind = 0; kind < 2; kind++) {
+              for (let sIdx = 0; sIdx < 2; sIdx++) {
+                for (let bin = 0; bin < BINS; bin++) {
+                  const j = (sIdx * BINS + bin) * 2 + kind;
+                  if (isNaN(srcY[j])) continue;
+                  let sy = 0, sz = 0, w = 0;
+                  for (let d = -RADIUS; d <= RADIUS; d++) {
+                    const bb = bin + d;
+                    if (bb < 0 || bb >= BINS) continue;
+                    const jj = (sIdx * BINS + bb) * 2 + kind;
+                    if (isNaN(srcY[jj])) continue;
+                    const wgt = 1 - Math.abs(d) / (RADIUS + 1);
+                    sy += srcY[jj] * wgt; sz += srcZ[jj] * wgt; w += wgt;
+                  }
+                  if (w > 0) { bandY[j] = sy / w; bandZ[j] = sz / w; }
+                }
+              }
+            }
+          }
+        }
+
         for (let k = 0; k < p.lashIdx.length; k++) {
           const kind = p.lashKind[k];
           const base = p.lashSide[k] * BINS;
@@ -1014,7 +1076,7 @@
         blinkv.textContent = (+blink.value).toFixed(2);
         applyBlink(+blink.value);
       };
-      for (const [id, digits] of [["curve", 3], ["meet", 2], ["smooth", 0]]) {
+      for (const [id, digits] of [["curve", 3], ["meet", 2], ["smooth", 0], ["carry", 2]]) {
         const el = document.getElementById(id);
         el.oninput = () => {
           document.getElementById(id + "v").textContent = (+el.value).toFixed(digits);
