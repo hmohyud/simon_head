@@ -839,8 +839,11 @@ layout();
 const blinkState = { next: 2.5, at: -10, amount: 0, double: false };
 
 function updateEyes(now, dt) {
-  /* rises while he is answering, falls back to dark when he stops */
-  speech.level += (speech.target - speech.level) * (1 - Math.exp(-7 * dt));
+  /* Rises quickly when he starts and dies away slowly when he stops: the
+     two directions get different rates, so the light is there the instant a
+     message is sent but takes about a second to leave. */
+  const rate = speech.target > speech.level ? 7 : 3.6;
+  speech.level += (speech.target - speech.level) * (1 - Math.exp(-rate * dt));
   const lit = speech.level < 0.004 ? 0 : speech.level;
 
   if (reduced) {
