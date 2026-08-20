@@ -64,13 +64,13 @@
           <span>test blink</span><input id="blink" type="range" min="0" max="1" step="0.02" value="0" /><b id="blinkv">0.00</b>
         </div>
         <div class="row">
-          <span>curve</span><input id="curve" type="range" min="0" max="0.06" step="0.002" value="0.022" /><b id="curvev">0.022</b>
+          <span>curve</span><input id="curve" type="range" min="0" max="0.06" step="0.002" value="0" /><b id="curvev">0.000</b>
         </div>
         <div class="row">
-          <span>lower rise</span><input id="meet" type="range" min="0" max="0.45" step="0.01" value="0.16" /><b id="meetv">0.16</b>
+          <span>lower rise</span><input id="meet" type="range" min="0" max="0.45" step="0.01" value="0.3" /><b id="meetv">0.30</b>
         </div>
         <div class="row">
-          <span>smooth</span><input id="smooth" type="range" min="0" max="8" step="1" value="3" /><b id="smoothv">3</b>
+          <span>smooth</span><input id="smooth" type="range" min="0" max="12" step="1" value="8" /><b id="smoothv">8</b>
         </div>
         <div class="hint">the upper lid rolls forward and lands on the lip of the lower lid; lashes ride along with it without deforming. paint both lids first.</div>
       </div>
@@ -659,6 +659,28 @@
             }
           }
         }
+        /* Columns the brush never reached borrow their nearest neighbour, so
+           the profiles are complete before anything samples them. Without
+           this, lashes sitting beyond the painted lid (the outer corners)
+           find no lid to hang from and are left behind entirely. */
+        const fillGaps = (arr) => {
+          for (let sIdx = 0; sIdx < 2; sIdx++) {
+            for (let bin = 0; bin < BINS; bin++) {
+              const j = sIdx * BINS + bin;
+              if (!isNaN(arr[j])) continue;
+              let best = -1, bestD = 1e9;
+              for (let c = 0; c < BINS; c++) {
+                const jj = sIdx * BINS + c;
+                if (isNaN(arr[jj])) continue;
+                const d = Math.abs(c - bin);
+                if (d < bestD) { bestD = d; best = jj; }
+              }
+              if (best >= 0) arr[j] = arr[best];
+            }
+          }
+        };
+        for (const arr of [colUpY, colUpZ, colUpHi, colLipY, colLipZ, colLoLo]) fillGaps(arr);
+
         /* per-bin extremes are noisy by nature — blur them into curves */
         for (const arr of [colUpY, colUpZ, colUpHi, colLipY, colLipZ, colLoLo]) smoothProfile(arr, 3);
 
@@ -694,8 +716,10 @@
         }
 
         const lashIdx = [], lashSide = [], lashFbin = [], lashKind = [];
+        const isLash = new Uint8Array(n);
         for (let i = 0; i < n; i++) {
           if (labelOf[i] !== 4) continue;
+          isLash[i] = 1;
           const x = basePositions[i * 3], y = basePositions[i * 3 + 1];
           const sIdx = x < 0 ? 0 : 1;
           if (!isFinite(sides[sIdx].xMin)) continue;
@@ -704,6 +728,16 @@
           if (isNaN(upLo) || isNaN(lip)) continue;
           lashIdx.push(i); lashSide.push(sIdx); lashFbin.push(fb);
           lashKind.push(y >= (upLo + lip) / 2 ? 0 : 1); // upper or lower lash
+        }
+
+        /* the margin band of each column: the lid vertices a lash is
+           attached to, so lash travel can be read back from them after the
+           lid has been smoothed */
+        const marginBand = Array.from({ length: COLS * 2 }, () => []);
+        for (let k = 0; k < idx.length; k++) {
+          if (W[k] < 0.75) continue; // only the leading edge of each lid
+          const j = sideOf[k] * BINS + Math.round(fbinOfV[k]);
+          marginBand[j * 2 + kind[k]].push(idx[k]);
         }
 
         /* vertices the smoothing pass may touch: everything that moves, plus
@@ -736,6 +770,10 @@
           lashSide: Uint8Array.from(lashSide),
           lashFbin: Float32Array.from(lashFbin),
           lashKind: Uint8Array.from(lashKind),
+          isLash,
+          marginBand,
+          bandY: new Float32Array(COLS * 2),
+          bandZ: new Float32Array(COLS * 2),
           colUpY, colUpZ, colLipY, colLipZ,
           meetY: new Float32Array(COLS).fill(NaN),
           meetZ: new Float32Array(COLS).fill(NaN),
@@ -808,46 +846,87 @@
           disp[i + 2] = c0 * p.P[o + 2] + c1 * p.C[o + 2] + c2 * p.T[o + 2] - p.P[o + 2];
         }
 
-        /* one translation per lash, taken from the margin it grows from and
-           sampled continuously along the eye so neighbours agree */
-        for (let k = 0; k < p.lashIdx.length; k++) {
-          const sIdx = p.lashSide[k], fb = p.lashFbin[k];
-          const my = p.sample(p.meetY, sIdx, fb), mz = p.sample(p.meetZ, sIdx, fb);
-          if (isNaN(my)) continue;
-          const upper = p.lashKind[k] === 0;
-          const ry = p.sample(upper ? p.colUpY : p.colLipY, sIdx, fb);
-          const rz = p.sample(upper ? p.colUpZ : p.colLipZ, sIdx, fb);
-          const cy = (ry + my) / 2;
-          const cz = (rz + mz) / 2 + (upper ? bulge : bulge * 0.35);
-          const i = p.lashIdx[k] * 3;
-          disp[i + 1] = c0 * ry + c1 * cy + c2 * my - ry;
-          disp[i + 2] = c0 * rz + c1 * cz + c2 * mz - rz;
-        }
-
-        /* Relax the displacement field over the mesh graph. Vertices outside
-           the selection hold at zero, so the motion feathers out at the
-           edges instead of ending in a hard step — and the lash/lid seam
-           blends without either side losing its overall travel. */
+        /* Relax the displacement field over the mesh graph so the lid feathers
+           into the untouched skin instead of ending in a hard step. Lashes
+           are held out of this: they are a separate form sitting on the lid,
+           and averaging them against stationary neighbours is exactly what
+           pinned their outer edges in place before. */
         const passes = +document.getElementById("smooth").value;
         if (passes > 0) {
           const { start, list } = adjacency;
           const src = disp, dst = p.disp2;
           for (let pass = 0; pass < passes; pass++) {
             for (const i of p.affected) {
+              if (p.isLash[i]) continue;
               let sx = src[i * 3], sy = src[i * 3 + 1], sz = src[i * 3 + 2], cnt = 1;
               for (let k = start[i]; k < start[i + 1]; k++) {
-                const u2 = list[k];
-                sx += src[u2 * 3]; sy += src[u2 * 3 + 1]; sz += src[u2 * 3 + 2];
+                const v = list[k];
+                if (p.isLash[v]) continue; // a lash must not drag the skin either
+                sx += src[v * 3]; sy += src[v * 3 + 1]; sz += src[v * 3 + 2];
                 cnt++;
               }
               dst[i * 3] = sx / cnt; dst[i * 3 + 1] = sy / cnt; dst[i * 3 + 2] = sz / cnt;
             }
             for (const i of p.affected) {
+              if (p.isLash[i]) continue;
               src[i * 3] = dst[i * 3];
               src[i * 3 + 1] = dst[i * 3 + 1];
               src[i * 3 + 2] = dst[i * 3 + 2];
             }
           }
+        }
+
+        /* Now read the lid's ACTUAL travel back off the margin of each column
+           and hand it to the lashes whole. Because it is measured after the
+           smoothing, the lashes track whatever the lid really did — they
+           cannot drift off it — and because every lash vertex in a column
+           gets the same vector, each lash moves as one solid piece. */
+        const { bandY, bandZ, marginBand } = p;
+        bandY.fill(NaN);
+        bandZ.fill(NaN);
+        for (let j = 0; j < marginBand.length; j++) {
+          const band = marginBand[j];
+          if (!band.length) continue;
+          let sy = 0, sz = 0;
+          for (const v of band) { sy += disp[v * 3 + 1]; sz += disp[v * 3 + 2]; }
+          bandY[j] = sy / band.length;
+          bandZ[j] = sz / band.length;
+        }
+        /* columns whose margin was never painted borrow the nearest that was */
+        for (let kind = 0; kind < 2; kind++) {
+          for (let sIdx = 0; sIdx < 2; sIdx++) {
+            for (let bin = 0; bin < BINS; bin++) {
+              const j = (sIdx * BINS + bin) * 2 + kind;
+              if (!isNaN(bandY[j])) continue;
+              let best = -1, bestD = 1e9;
+              for (let c = 0; c < BINS; c++) {
+                const jj = (sIdx * BINS + c) * 2 + kind;
+                if (isNaN(bandY[jj])) continue;
+                const d = Math.abs(c - bin);
+                if (d < bestD) { bestD = d; best = jj; }
+              }
+              if (best >= 0) { bandY[j] = bandY[best]; bandZ[j] = bandZ[best]; }
+            }
+          }
+        }
+        for (let k = 0; k < p.lashIdx.length; k++) {
+          const kind = p.lashKind[k];
+          const base = p.lashSide[k] * BINS;
+          const fb = p.lashFbin[k];
+          const b0 = Math.floor(fb), t = fb - b0;
+          const j0 = (base + Math.max(0, Math.min(BINS - 1, b0))) * 2 + kind;
+          const j1 = (base + Math.max(0, Math.min(BINS - 1, b0 + 1))) * 2 + kind;
+          let dy = bandY[j0], dz = bandZ[j0];
+          if (!isNaN(bandY[j1]) && !isNaN(dy)) {
+            dy += (bandY[j1] - dy) * t;
+            dz += (bandZ[j1] - dz) * t;
+          } else if (isNaN(dy)) {
+            dy = bandY[j1]; dz = bandZ[j1];
+          }
+          if (isNaN(dy)) continue;
+          const i = p.lashIdx[k] * 3;
+          disp[i + 1] = dy;
+          disp[i + 2] = dz;
         }
 
         for (const i of p.affected) {
