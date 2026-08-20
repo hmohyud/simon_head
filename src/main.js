@@ -614,8 +614,9 @@ const state = {
   excite: 0, // chat reaction: momentarily livelier wobble
 };
 
-/* The eyes are dark until he speaks: they come up while the answer types
-   out and fade when it finishes. */
+/* The eyes are dark until he speaks: they come up the moment a message is
+   sent, stay up through the wait and the typing, and fade a couple of
+   seconds after the last character. */
 const speech = { level: 0, target: 0 };
 
 initChat({
@@ -625,7 +626,7 @@ initChat({
   onReply: () => {
     state.excite = 1.6;
   },
-  onTyping: (active) => {
+  onSpeaking: (active) => {
     speech.target = active ? 1 : 0;
   },
   /* so Simon knows what he's currently rendered as */

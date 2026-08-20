@@ -16,7 +16,7 @@ const ENDPOINTS = (import.meta.env.DEV ? ["/api/chat", WORKER_URL] : [WORKER_URL
 const STORE_KEY = "simon-chat-history";
 const MAX_STORED = 200;
 
-export function initChat({ onThinking, onReply, onTyping, getMaterial } = {}) {
+export function initChat({ onThinking, onReply, onSpeaking, getMaterial } = {}) {
   const root = document.getElementById("chat");
   if (!root) return;
   if (!ENDPOINTS.length) {
@@ -83,13 +83,26 @@ export function initChat({ onThinking, onReply, onTyping, getMaterial } = {}) {
      beat, which is most of what makes it read as speech instead of a
      progress bar. onTyping brackets the whole run, so the eyes can be lit
      for exactly as long as he is talking. */
+  /* The eyes come up the moment a message is sent and stay up until two
+     seconds after the answer has finished typing. Held here rather than in
+     the typing loop, so the light covers the wait for the reply as well —
+     and so a second message during the hold keeps it lit instead of
+     letting it drop. */
+  let litTimer = null;
+  const setLit = (on, holdMs = 0) => {
+    clearTimeout(litTimer);
+    if (on) {
+      onSpeaking?.(true);
+    } else {
+      litTimer = setTimeout(() => onSpeaking?.(false), holdMs);
+    }
+  };
+
   let typingRun = 0;
   function typeOut(text) {
     const run = ++typingRun;
-    onTyping?.(true);
     if (slowMotionOff) {
       replyEl.textContent = text;
-      onTyping?.(false);
       return Promise.resolve();
     }
     replyEl.textContent = "";
@@ -98,10 +111,7 @@ export function initChat({ onThinking, onReply, onTyping, getMaterial } = {}) {
       const step = () => {
         if (run !== typingRun) return resolve(); // a newer reply took over
         replyEl.textContent = text.slice(0, ++i);
-        if (i >= text.length) {
-          onTyping?.(false);
-          return resolve();
-        }
+        if (i >= text.length) return resolve();
         const ch = text[i - 1];
         const beat = ".!?".includes(ch) ? 390 : ",;:".includes(ch) ? 195 : 27;
         setTimeout(step, beat);
@@ -117,6 +127,7 @@ export function initChat({ onThinking, onReply, onTyping, getMaterial } = {}) {
     input.value = "";
     syncSend();
     busy = true;
+    setLit(true); // lit from the moment they hit send
     root.classList.add("busy");
     replyEl.innerHTML = THINKING_HTML;
     replyEl.classList.add("show");
@@ -156,5 +167,6 @@ export function initChat({ onThinking, onReply, onTyping, getMaterial } = {}) {
     busy = false;
     input.focus();
     await typeOut(reply);
+    setLit(false, 2000); // linger a beat after the last character
   });
 }
