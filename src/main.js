@@ -541,9 +541,12 @@ const eyeUniforms = {
    nothing. */
 const EYE_FRAGMENT_CHUNK = /* glsl */ `#include <emissivemap_fragment>
 {
-  float mask = clamp(vEyeMask, 0.0, 1.0);
+  /* Ease the mask before using it. At a high burn a linear feather clips to
+     white almost immediately, so the soft edge vanished and what showed was
+     the raw painted boundary — the jagged look on the darker materials. */
+  float mask = smoothstep(0.0, 1.0, clamp(vEyeMask, 0.0, 1.0));
   diffuseColor.rgb *= mix(1.0, 0.08, mask * uEyeSocket);
-  totalEmissiveRadiance += uEyeColour * pow(mask, 1.4) * uEyeIntensity * uEyeGlow;
+  totalEmissiveRadiance += uEyeColour * pow(mask, 2.2) * uEyeIntensity * uEyeGlow;
 }`;
 
 const EYE_VARYINGS = /* glsl */ `
@@ -611,12 +614,19 @@ const state = {
   excite: 0, // chat reaction: momentarily livelier wobble
 };
 
+/* The eyes are dark until he speaks: they come up while the answer types
+   out and fade when it finishes. */
+const speech = { level: 0, target: 0 };
+
 initChat({
   onThinking: () => {
     state.excite = 0.6;
   },
   onReply: () => {
     state.excite = 1.6;
+  },
+  onTyping: (active) => {
+    speech.target = active ? 1 : 0;
   },
   /* so Simon knows what he's currently rendered as */
   getMaterial: () => viewer.currentVariant,
@@ -827,10 +837,17 @@ layout();
    light dips with the lid rather than shining on through it. */
 const blinkState = { next: 2.5, at: -10, amount: 0, double: false };
 
-function updateEyes(now, dt, excite) {
+function updateEyes(now, dt) {
+  /* rises while he is answering, falls back to dark when he stops */
+  speech.level += (speech.target - speech.level) * (1 - Math.exp(-7 * dt));
+  const lit = speech.level < 0.004 ? 0 : speech.level;
+
   if (reduced) {
-    eyeUniforms.uEyeGlow.value = 1;
-    for (const lamp of eyeLamps) lamp.intensity = EYES.lamp;
+    eyeUniforms.uEyeGlow.value = lit;
+    for (const lamp of eyeLamps) {
+      lamp.intensity = EYES.lamp * lit;
+      lamp.visible = lit > 0;
+    }
     return;
   }
 
@@ -855,11 +872,16 @@ function updateEyes(now, dt, excite) {
   blinkState.amount += (amount - blinkState.amount) * (1 - Math.exp(-40 * dt));
   for (const mesh of viewer.blinkMeshes) mesh.morphTargetInfluences[0] = blinkState.amount;
 
-  /* the glow follows the lid, and flares while he is answering */
+  /* the glow follows the lid, so a blink mid-sentence dims it too */
   const open = 1 - blinkState.amount * 0.92;
-  const flare = 1 + excite * 0.7;
-  eyeUniforms.uEyeGlow.value = open * flare * (0.94 + 0.06 * Math.sin(now * 1.7));
-  for (const lamp of eyeLamps) lamp.intensity = EYES.lamp * open * flare;
+  eyeUniforms.uEyeGlow.value = lit * open * (0.94 + 0.06 * Math.sin(now * 1.7));
+  for (const lamp of eyeLamps) {
+    lamp.intensity = EYES.lamp * lit * open;
+    /* Dark lamps are switched off outright rather than dimmed to zero: an
+       invisible light still costs a shadow map every frame, and this is the
+       whole ~0.8ms of it. */
+    lamp.visible = lit > 0;
+  }
 }
 
 /* ---------- render loop ---------- */
@@ -950,7 +972,7 @@ renderer.setAnimationLoop((t) => {
   const sc = 0.86 + 0.14 * inE;
   head.scale.setScalar(sc);
 
-  updateEyes(t / 1000, dt, s.excite);
+  updateEyes(t / 1000, dt);
 
   /* ease the marble palette toward the selected stone */
   if (marbleState.uniforms) {

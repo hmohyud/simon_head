@@ -143,7 +143,7 @@ body.ready #chat {
   background: rgba(13, 15, 19, 0.72);
   border: 1px solid rgba(255, 255, 255, 0.16);
   border-radius: 999px;
-  padding: 11px 42px 11px 18px;
+  padding: 11px 44px 11px 42px;
   color: #e3e7ee;
   font: 400 13px/1.4 ui-serif, Georgia, "Times New Roman", serif;
   letter-spacing: 0.04em;
@@ -163,12 +163,9 @@ body.ready #chat {
   opacity: 0.6;
 }
 
-/* Send button — touch devices only (see the media query below). Reaching
-   the keyboard's Enter mid-sentence is awkward on a phone, so the pill
-   gets an explicit send affordance there; desktop keeps the cleaner
-   Enter-only pill. */
+/* Send button, on every device. Enter still submits — this just makes that
+   visible rather than something you have to guess at. */
 #chat-send {
-  display: none;
   position: absolute;
   right: 5px;
   top: 50%;
@@ -201,10 +198,10 @@ body.ready #chat {
   pointer-events: none;
 }
 
-/* history chevron inside the input pill */
+/* history chevron: leading edge of the pill, away from the send button */
 #chat-history-btn {
   position: absolute;
-  right: 6px;
+  left: 6px;
   top: 50%;
   transform: translateY(-50%);
   width: 30px;
@@ -381,15 +378,12 @@ body.ready #marbles {
     width: min(440px, 88vw);
     bottom: calc(3vh + env(safe-area-inset-bottom, 0px));
   }
-  #chat-send {
-    display: block;
-  }
   #chat-input {
-    padding: 14px 84px 14px 18px;
+    padding: 14px 48px 14px 48px;
     font-size: 16px; /* iOS zooms the page for anything smaller on focus */
   }
   #chat-history-btn {
-    right: 44px;
+    left: 6px;
     width: 34px;
     height: 34px;
   }

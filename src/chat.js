@@ -16,7 +16,7 @@ const ENDPOINTS = (import.meta.env.DEV ? ["/api/chat", WORKER_URL] : [WORKER_URL
 const STORE_KEY = "simon-chat-history";
 const MAX_STORED = 200;
 
-export function initChat({ onThinking, onReply, getMaterial } = {}) {
+export function initChat({ onThinking, onReply, onTyping, getMaterial } = {}) {
   const root = document.getElementById("chat");
   if (!root) return;
   if (!ENDPOINTS.length) {
@@ -77,6 +77,38 @@ export function initChat({ onThinking, onReply, getMaterial } = {}) {
   syncSend();
 
   const THINKING_HTML = '<span class="dots"><i></i><i></i><i></i></span>';
+  const slowMotionOff = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+
+  /* Type the reply out rather than dumping it. Punctuation gets a longer
+     beat, which is most of what makes it read as speech instead of a
+     progress bar. onTyping brackets the whole run, so the eyes can be lit
+     for exactly as long as he is talking. */
+  let typingRun = 0;
+  function typeOut(text) {
+    const run = ++typingRun;
+    onTyping?.(true);
+    if (slowMotionOff) {
+      replyEl.textContent = text;
+      onTyping?.(false);
+      return Promise.resolve();
+    }
+    replyEl.textContent = "";
+    return new Promise((resolve) => {
+      let i = 0;
+      const step = () => {
+        if (run !== typingRun) return resolve(); // a newer reply took over
+        replyEl.textContent = text.slice(0, ++i);
+        if (i >= text.length) {
+          onTyping?.(false);
+          return resolve();
+        }
+        const ch = text[i - 1];
+        const beat = ".!?".includes(ch) ? 390 : ",;:".includes(ch) ? 195 : 27;
+        setTimeout(step, beat);
+      };
+      step();
+    });
+  }
 
   form.addEventListener("submit", async (e) => {
     e.preventDefault();
@@ -118,11 +150,11 @@ export function initChat({ onThinking, onReply, getMaterial } = {}) {
     if (!reply) reply = "…the stone is tired. try again in a bit.";
     history.push({ role: "assistant", content: reply });
     save();
-    replyEl.textContent = reply;
     if (historyEl.classList.contains("open")) renderLog();
     onReply?.();
     root.classList.remove("busy");
     busy = false;
     input.focus();
+    await typeOut(reply);
   });
 }
