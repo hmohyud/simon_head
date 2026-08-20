@@ -6,3 +6,4 @@ public/original.glb
 .env.local
 .env*.local
 .wrangler/
+exports/
