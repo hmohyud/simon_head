@@ -1,3 +1,23 @@
 name = "simon-chat"
 main = "chat-worker.js"
 compatibility_date = "2026-08-01"
+
+# Workers AI: free links 2 and 3 in the chain (Qwen, then Mistral). No key —
+# it runs inside Cloudflare. 10,000 neurons/day shared on the Free plan,
+# which stops rather than bills when it runs out.
+[ai]
+binding = "AI"
+
+# Per-visitor brake in front of every provider (see chat-worker.js).
+[[ratelimits]]
+name = "LIMITER"
+namespace_id = "7311"
+
+  [ratelimits.simple]
+  limit = 15
+  period = 60
+
+# Keeps each message's provider trail, so a failing link can be seen after
+# the fact in the dashboard rather than only live in `wrangler tail`.
+[observability]
+enabled = true

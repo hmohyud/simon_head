@@ -7,3 +7,4 @@ public/original.glb
 .env*.local
 .wrangler/
 exports/
+.dev.vars

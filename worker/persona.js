@@ -3,14 +3,6 @@
  * the Vite dev proxy so both speak identically. Refine the VOICE EXAMPLES
  * with real messages from Simon — that's what locks in the tone.
  */
-/* Chosen from what Groq's free tier actually serves: Qwen follows persona
-   prompts (swearing included) far better than the heavily-aligned gpt-oss
-   models, which break character and sanitize. */
-export const MODEL = "qwen/qwen3.6-27b";
-
-/* Qwen 3.6 is a reasoning model — without this it burns the whole token
-   budget thinking about how to be rude instead of being rude. Turn the
-   reasoning off; banter needs vibes, not deliberation. */
 /* Sentence-case a reply: models mimic the lowercase texting style of prior
    turns no matter what the system prompt says, so capitalization is
    enforced deterministically — sentence starts and the standalone pronoun. */
@@ -29,34 +21,30 @@ export const MATERIAL_NAMES = {
   stucco: "stucco plaster, like a cheap apartment ceiling",
 };
 
-export function groqPayload(history, material) {
+/* The conversation every provider receives: persona, the material the bust
+   is currently rendered in, then the visitor's recent turns. Identical for
+   all of them, so the voice travels with the prompt rather than the host.
+   One system message, not two — some providers reject a second. */
+export function buildMessages(history, material) {
   /* polish assistant turns in the context too, so old lowercase chats
      stored in visitors' browsers stop teaching him bad habits */
   const cleaned = history.map((m) =>
     m.role === "assistant" ? { ...m, content: polish(m.content) } : m
   );
-  const messages = [{ role: "system", content: PERSONA }];
   const look = MATERIAL_NAMES[material];
-  if (look) {
-    messages.push({
-      role: "system",
-      content: `CURRENT LOOK: the visitor currently has your bust rendered as ${look}. If your material comes up, THAT is what you are right now — react accordingly (smug if marble, irritated at the visitor otherwise). Don't bring it up unprompted unless it's genuinely funny to.`,
-    });
-  }
-  return {
-    model: MODEL,
-    messages: [...messages, ...cleaned],
-    max_tokens: 300,
-    temperature: 0.9,
-    reasoning_effort: "none",
-  };
+  const system = look
+    ? `${PERSONA}
+
+CURRENT LOOK: the visitor currently has your bust rendered as ${look}. If your material comes up, THAT is what you are right now — react accordingly (smug if marble, irritated at the visitor otherwise). Don't bring it up unprompted unless it's genuinely funny to.`
+    : PERSONA;
+  return [{ role: "system", content: system }, ...cleaned];
 }
 
-/* Canned in-character lines for Groq rate limits. Two axes: minute-limit
-   (transient) vs daily (out till midnight UTC), and whether THIS visitor
-   has actually been talking much — the limits are shared across everyone
-   on the site, so someone two messages in gets blamed on "someone else",
-   not accused of burning Simon's words. */
+/* Canned in-character lines for when every provider is rate limited. Two
+   axes: minute-limit (transient) vs daily (out till tomorrow), and whether
+   THIS visitor has actually been talking much — the limits are shared
+   across everyone on the site, so someone two messages in gets blamed on
+   "someone else", not accused of burning Simon's words. */
 const LIMIT_LINES = {
   minuteHeavy: [
     "Jesus, breathe. You talk so much I literally ran out of words. Give me a minute.",
@@ -80,8 +68,8 @@ const LIMIT_LINES = {
   ],
 };
 
-/* Transient upstream hiccups (5xx, overload) — one retry happens first;
-   if it still fails, Simon stays in character instead of erroring. */
+/* When every provider is down or out of sorts, Simon stays in character
+   instead of erroring. */
 const BUSY_LINES = [
   "Say that again in a couple seconds. I was busy being admired.",
   "Hang on, my head's spinning — literally. Go again in a moment.",
