@@ -7,11 +7,11 @@
  * dev), with no code change.
  *
  * `family` pins the line of models known to hold Simon's voice. The newest
- * active model matching it is picked at runtime from the provider's own
- * model list, so a retirement or a new release needs no edit here. Setting
- * `<ID>_MODEL` (e.g. GROQ_MODEL, CFAI_MISTRAL_MODEL) as a secret or var pins
- * one by hand instead. `model` is only the fallback when the list can't be
- * read — and the only option for Workers AI, which has no list.
+ * usable model matching it is picked at runtime from the provider's own
+ * model list (Workers AI's catalog, for the binding), so a retirement or a
+ * new release needs no edit here. Setting `<ID>_MODEL` (e.g. GROQ_MODEL,
+ * CFAI_MISTRAL_MODEL) as a secret or var pins one by hand instead. `model`
+ * is only the fallback for when the list can't be read.
  *
  * ORDER IS VOICE FIRST. Every model here was tested against the real
  * persona before going in. Most free models are heavily aligned and answer
@@ -55,6 +55,7 @@ export const PROVIDERS = [
     host: "cfai",
     sharedQuota: true, // 10k neurons/day across every Workers AI model
     binding: "AI",
+    family: /^@cf\/qwen\/qwen\d+(\.\d+)?-\d+b$/i,
     model: "@cf/qwen/qwen3.8-27b",
     /* measured 1-28s, median ~2s: worth waiting for briefly, not for long */
     timeoutMs: 6000,
@@ -68,6 +69,7 @@ export const PROVIDERS = [
     host: "cfai",
     sharedQuota: true,
     binding: "AI",
+    family: /^@cf\/mistralai\/mistral-small-[\d.]+-\d+b-instruct$/i,
     model: "@cf/mistralai/mistral-small-3.1-24b-instruct",
     timeoutMs: 5000, // measured 0.4-1.6s; no reasoning to switch off
   },

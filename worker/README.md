@@ -51,11 +51,18 @@ in one place works in one place.
 
 ## When a model is retired
 
-Usually nothing to do: the worker reads each provider's model list and uses
-the newest release in the model's family that it serves. To pin one by hand
-— or for Workers AI, which has no list to read — set `GROQ_MODEL`,
-`CFAI_MODEL`, `CFAI_MISTRAL_MODEL` or `GROQ_OSS_MODEL` with
-`wrangler secret put`; it takes effect in seconds.
+Usually nothing to do: the worker reads each provider's model list (for
+Workers AI, its catalog) and uses the newest usable release in each model's
+family, skipping anything that needs the paid Workers plan or is past its
+deprecation date. A model retired mid-conversation is swapped for its
+successor on the spot.
+
+What it can't do on its own: notice a family being renamed, a new release
+needing a different "thinking off" switch, or a release that's tamer than
+the last. The chain routes around the first two (visitors still get an
+answer) and `/health` flags them; the third needs ears. To pin a model by
+hand, set `GROQ_MODEL`, `CFAI_MODEL`, `CFAI_MISTRAL_MODEL` or
+`GROQ_OSS_MODEL` with `wrangler secret put`; it takes effect in seconds.
 
 ## Is it healthy?
 

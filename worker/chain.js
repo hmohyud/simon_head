@@ -91,7 +91,31 @@ const pinnedBy = (p, env) => env[`${p.id.toUpperCase().replace(/[^A-Z0-9]+/g, "_
 
 const headersFor = (p, env) => ({ authorization: `Bearer ${env[p.secret]}`, ...(p.headers ?? {}) });
 
+/* Workers AI's catalog, reshaped like an OpenAI model list. Models that
+   need the paid Workers plan are marked inactive rather than discovered by
+   failing (and so can never start a bill), as are ones past their
+   deprecation date. */
+const catalogProp = (m, id) => (m.properties ?? []).find((x) => x.property_id === id)?.value;
+export function catalogToList(all, now = Date.now()) {
+  return (Array.isArray(all) ? all : [])
+    .filter((m) => m && typeof m.name === "string" && m.task?.name === "Text Generation")
+    .map((m) => ({
+      id: m.name,
+      created: Date.parse(`${String(m.created_at).replace(" ", "T")}Z`) || 0,
+      active:
+        String(catalogProp(m, "require_workers_paid")) !== "true" &&
+        !(Date.parse(catalogProp(m, "planned_deprecation_date")) <= now),
+    }));
+}
+
 async function listModels(p, env, fetchImpl, ms) {
+  if (p.binding) {
+    /* AI.models() isn't on the binding's docs page, but it's on the binding
+       and it's how wrangler lists the catalog; if it ever goes away this
+       throws and the pinned model is used, as with any unreadable list */
+    const all = await withTimeout(env[p.binding].models({}), ms);
+    return { status: 200, list: catalogToList(all) };
+  }
   const res = await fetchImpl(`${p.base}/models`, {
     headers: headersFor(p, env),
     signal: AbortSignal.timeout(ms),
@@ -340,21 +364,20 @@ export async function health(env, opts = {}) {
     const pin = pinnedBy(p, env);
     if (pin) row.pinned = pin;
     if (p.binding) {
-      /* every probe would spend free neurons; a monitor polling this would
-         eat a real share of the daily allowance */
-      row.ok = null;
-      row.model = pin ?? p.model;
-      row.note = "not probed";
-      report.push(row);
-      continue;
+      /* The catalog is free to read, so whether the model exists (and is
+         on this plan) is checked. Running it isn't: every probe would
+         spend free neurons, and a monitor polling this would eat a real
+         share of the daily allowance. */
+      row.note = "model checked in the catalog; not run";
     }
     try {
       const { status, list, body } = await listModels(p, env, fetchImpl, LIST_MS);
       if (list) {
         const want = pin ?? (p.family ? newestInFamily(list, p) : p.model);
-        row.model = want && list.some((m) => m.id === want) ? want : null;
+        /* listed isn't enough: a retired or paid-only model is listed too */
+        row.model = want && list.some((m) => m.id === want && m.active !== false) ? want : null;
         row.ok = Boolean(row.model);
-        if (!row.ok) row.problem = pin ? `${pin} is not being served` : "nothing in the model family is being served";
+        if (!row.ok) row.problem = pin || !p.family ? `${want} is not usable` : "nothing in the model family is usable";
       } else {
         row.ok = false;
         row.problem = `${classify(status, body)} (HTTP ${status})`;
